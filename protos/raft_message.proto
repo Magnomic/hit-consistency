@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package hit_consistency;
+// The Raft service.
+service RaftService {
+    // Sends a greeting
+    rpc prevote (RequestVoteRequest) returns (RequestVoteResponse) {}
+}
+  
+message RequestVoteRequest {
+    string server_id = 1;
+    string peer_id = 2;
+    int64 term = 3;
+    int64 last_log_term = 4;
+    int64 last_log_index = 5;
+}
+
+message RequestVoteResponse {
+    int64 term = 1;
+    bool granted = 2;
+};
