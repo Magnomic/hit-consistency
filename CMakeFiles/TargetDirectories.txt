@@ -1,4 +1,0 @@
-/root/hit-consistency/CMakeFiles/raft_client.dir
-/root/hit-consistency/CMakeFiles/raft_server.dir
-/root/hit-consistency/CMakeFiles/edit_cache.dir
-/root/hit-consistency/CMakeFiles/rebuild_cache.dir
