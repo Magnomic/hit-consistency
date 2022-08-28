@@ -8,10 +8,15 @@ RaftSericeImpl::~RaftSericeImpl(){
     
 }
 
-Status RaftSericeImpl::prevote(ServerContext* context, const RequestVoteRequest* request,
-        RequestVoteResponse* reply) {
-            std::string prifix("Hello");
-            reply->set_granted(true);
-            reply->set_term(1);
-            return Status::OK;
+void RaftSericeImpl::prevote(google::protobuf::RpcController* cntl_base, const RequestVoteRequest* request,
+                  RequestVoteResponse* response, google::protobuf::Closure* done) {
+    brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl =
+    static_cast<brpc::Controller*>(cntl_base);
+    NodeImpl& node = NodeImpl::getInstance();
+    node.handle_prevote(request, response);
+    LOG(INFO) << "Get prevote from " << request->server_id();
+    response->set_granted(true);
+    response->set_term(1);
+    return;
 }

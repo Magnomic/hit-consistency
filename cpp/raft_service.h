@@ -3,28 +3,23 @@
 #include <iostream>
 #include <memory>
 #include <string>
-#include <grpc/grpc.h>
-#include <grpcpp/security/server_credentials.h>
-#include <grpcpp/server.h>
-#include <grpcpp/server_builder.h>
-#include <grpcpp/server_context.h>
-#include "raft_message.grpc.pb.h"
+#include <butil/logging.h>
+#include <brpc/server.h>
+#include <brpc/channel.h>
+#include "raft_message.pb.h"
+#include "node.h"
 
-using grpc::Server;
-using grpc::ServerBuilder;
-using grpc::ServerContext;
-using grpc::Status;
 using hit_consistency::RaftService;
 using hit_consistency::RequestVoteRequest;
 using hit_consistency::RequestVoteResponse;
 
 
-class RaftSericeImpl final : public RaftService::Service {
+class RaftSericeImpl final : public RaftService {
     public:
     RaftSericeImpl();
     ~RaftSericeImpl();
-    Status prevote(ServerContext* context, const RequestVoteRequest* request,
-                  RequestVoteResponse* reply);
+    void prevote(google::protobuf::RpcController* cntl_base, const RequestVoteRequest* request,
+                  RequestVoteResponse* response, google::protobuf::Closure* done);
 };
 
 #endif 
