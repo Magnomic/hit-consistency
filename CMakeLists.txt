@@ -12,7 +12,11 @@ set(CMAKE_PREFIX_PATH ${OUTPUT_PATH})
 
 include(FindThreads)
 include(FindProtobuf)
-protobuf_generate_cpp(PROTO_SRC PROTO_HEADER ./protos/raft_message.proto)
+
+file(GLOB ProtoFiles "${CMAKE_CURRENT_SOURCE_DIR}/protos/*.proto")
+
+protobuf_generate_cpp(PROTO_SRC PROTO_HEADER ${ProtoFiles})
+# protobuf_generate_cpp(PROTO_SRC PROTO_HEADER ./protos/enum.proto)
 # include PROTO_HEADER
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 

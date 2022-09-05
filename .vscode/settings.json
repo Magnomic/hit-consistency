@@ -60,6 +60,7 @@
         "hash_map": "cpp",
         "hash_set": "cpp",
         "sstream": "cpp",
-        "cinttypes": "cpp"
+        "cinttypes": "cpp",
+        "*.inc": "cpp"
     }
 }

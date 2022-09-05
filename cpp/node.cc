@@ -2,6 +2,8 @@
 
 NodeImpl::NodeImpl(){};
 
+NodeImpl::NodeImpl(const GroupId& group_id, const PeerId& peer_id){};
+
 NodeImpl::~NodeImpl(){};
 
 NodeImpl& NodeImpl::getInstance(){
@@ -9,25 +11,12 @@ NodeImpl& NodeImpl::getInstance(){
         return instance;
 }
 
-int NodeImpl::init(std::string server_addr, int server_port, int server_timeout){
-    butil::EndPoint point;
-    if (!server_addr.empty()) {
-        if (butil::str2endpoint(server_addr.c_str(), server_port, &point) < 0) {
-            LOG(ERROR) << "Invalid listen address:" << server_addr;
-            return -1;
-        }
-    } else {
-        point = butil::EndPoint(butil::IP_ANY, server_port);
-    }
-    _server_timeout = server_timeout;
-    PeerId peer_id(point);
-    _server_id = peer_id;
-    NodeId _id("default_group", peer_id);
-    _peer_list.insert(peer_id);
+int NodeImpl::init(NodeOptions node_options, const PeerId& peer_id){
 
-    butil::EndPoint another_point(butil::EndPoint(butil::IP_ANY, (server_port + 1) % 2 + 8000));
-    PeerId another_peer_id(another_point);
-    _peer_list.insert(another_peer_id);
+    _conf.id = LogId();
+    _conf.conf = _options.initial_conf;
+
+    _server_id = peer_id;
 
     return 0;
 }
@@ -99,9 +88,9 @@ int NodeImpl::handle_prevote(const RequestVoteRequest* request, RequestVoteRespo
 
 
 void NodeImpl::prevote(std::unique_lock<raft::raft_mutex_t>* lck){
-    LOG(INFO) << "prevote invoked from " << _server_id;
+    // Create a new ballot for pre-vote
+    _prevote_ctx.init(_conf.conf, _conf.stable() ? NULL : &_conf.old_conf);
 
-    int _current_term(0);
     for (std::set<PeerId>::const_iterator
             iter = _peer_list.begin(); iter != _peer_list.end(); ++iter) {
 
@@ -139,6 +128,11 @@ void NodeImpl::handle_election_timeout() {
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
 
     return prevote(&lck);
+}
+
+
+void NodeImpl::on_error(const Error& e){
+
 }
 
 // Timers
