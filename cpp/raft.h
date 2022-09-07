@@ -52,6 +52,7 @@ private:
 };
 
 struct NodeOptions {
+
     // A follower would become a candidate if it doesn't receive any message 
     // from the leader in |election_timeout_ms| milliseconds
     // Default: 1000 (1s)

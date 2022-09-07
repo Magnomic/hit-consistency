@@ -15,9 +15,10 @@ int NodeImpl::init(NodeOptions node_options, const PeerId& peer_id){
 
     _conf.id = LogId();
     _conf.conf = _options.initial_conf;
-
     _server_id = peer_id;
 
+    node_options.initial_conf.list_peers(&_peer_list);
+    
     return 0;
 }
 
@@ -33,7 +34,7 @@ int NodeImpl::start(){
             return -1;
         }
     CHECK_EQ(0, _election_timer.init(this, 1000));
-    
+
     // Start the server.
     brpc::ServerOptions options;
     options.idle_timeout_sec = _server_timeout;
@@ -94,6 +95,7 @@ void NodeImpl::prevote(std::unique_lock<raft::raft_mutex_t>* lck){
     for (std::set<PeerId>::const_iterator
             iter = _peer_list.begin(); iter != _peer_list.end(); ++iter) {
 
+        LOG(INFO) << *iter;
         if (*iter == _server_id){
             continue;
         }
@@ -112,7 +114,6 @@ void NodeImpl::prevote(std::unique_lock<raft::raft_mutex_t>* lck){
         done->request.set_term(_current_term + 1); // next term
         done->request.set_last_log_index(1);
         done->request.set_last_log_term(0);
-        LOG(INFO) << "sending prevote req to " << *iter << std::endl;
         RaftService_Stub stub(&channel);
         stub.prevote(&done->cntl, &done->request, &done->response, done);
     }
