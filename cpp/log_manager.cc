@@ -135,9 +135,6 @@ int64_t LogManager::last_log_index(bool is_flush) {
     if (!is_flush) {
         return _last_log_index;
     } else {
-        if (_last_log_index == _last_snapshot_id.index) {
-            return _last_log_index;
-        }
         LastLogIdClosure c;
         CHECK_EQ(0, bthread::execution_queue_execute(_disk_queue, &c));
         lck.unlock();
@@ -154,9 +151,6 @@ LogId LogManager::last_log_id(bool is_flush) {
         }
         return _last_snapshot_id;
     } else {
-        if (_last_log_index == _last_snapshot_id.index) {
-            return _last_snapshot_id;
-        }
         LastLogIdClosure c;
         CHECK_EQ(0, bthread::execution_queue_execute(_disk_queue, &c));
         lck.unlock();

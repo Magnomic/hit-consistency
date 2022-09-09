@@ -80,6 +80,14 @@ struct NodeOptions {
     // Default: A empty group
     Configuration initial_conf;
 
+    
+    // The specific LogStorage implemented at the bussiness layer, which should be a valid
+    // instance, otherwise use SegmentLogStorage by default.
+    //
+    // Default: null
+    LogStorage* log_storage;
+
+
     // If |node_owns_fsm| is true. |fms| would be destroyed when the backing
     // Node is no longer referenced.
     //
@@ -172,121 +180,6 @@ struct Task {
 };
 
 class NodeImpl;
-class Node {
-public:
-    Node(const GroupId& group_id, const PeerId& peer_id);
-    virtual ~Node();
-
-    // get node id
-    NodeId node_id();
-
-    // get leader PeerId, for redirect
-    PeerId leader_id();
-
-    // Return true if this is the leader of the belonging group
-    bool is_leader();
-
-    // init node
-    int init(const NodeOptions& options);
-
-    // shutdown local replica.
-    // done is user defined function, maybe response to client or clean some resource
-    // [NOTE] code after apply can't access resource in done
-    void shutdown(Closure* done);
-
-    // Block the thread until the node is successfully stopped.
-    void join();
-
-    // [Thread-safe and wait-free]
-    // apply task to the replicated-state-machine
-    //
-    // About the ownership:
-    // |task.data|: for the performance consideration, we will take away the 
-    //              content. If you want keep the content, copy it before call
-    //              this function
-    // |task.done|: If the data is successfully committed to the raft group. We
-    //              will pass the ownership to StateMachine::on_apply.
-    //              Otherwise we will specify the error and call it.
-    //
-    void apply(const Task& task);
-
-    // list peers of this raft group, only leader retruns ok
-    // [NOTE] when list_peers concurrency with add_peer/remove_peer, maybe return peers is staled.
-    // because add_peer/remove_peer immediately modify configuration in memory
-    butil::Status list_peers(std::vector<PeerId>* peers);
-
-    // Add a new peer to the raft group. done->Run() would be invoked after this
-    // operation finishes, describing the detailed result.
-    void add_peer(const PeerId& peer, Closure* done);
-
-    // Remove the peer from the raft group. done->Run() would be invoked after
-    // this operation finishes, describing the detailed result.
-    void remove_peer(const PeerId& peer, Closure* done);
-
-    // Change the configuration of the raft group to |new_peers| , done->Run()
-    // would be invoked after this operation finishes, describing the detailed
-    // result.
-    void change_peers(const Configuration& new_peers, Closure* done);
-
-    // Reset the configuration of this node individually, without any repliation
-    // to other peers before this node beomes the leader. This function is
-    // supposed to be inovoked when the majority of the replication group are
-    // dead and you'd like to revive the service in the consideration of
-    // availability.
-    // Notice that neither consistency nor consensus are guaranteed in this
-    // case, BE CAREFULE when dealing with this method.
-    butil::Status reset_peers(const Configuration& new_peers);
-
-    // Start a snapshot immediately if possible. done->Run() would be invoked
-    // when the snapshot finishes, describing the detailed result.
-    void snapshot(Closure* done);
-
-    // user trigger vote
-    // reset election_timeout, suggest some peer to become the leader in a
-    // higher probability
-    void vote(int election_timeout);
-
-    // reset the election_timeout for the very node
-    void reset_election_timeout_ms(int election_timeout_ms);
-
-    // Try transferring leadership to |peer|.
-    // If peer is ANY_PEER, a proper follower will be chosen as the leader for
-    // the next term.
-    // Returns 0 on success, -1 otherwise.
-    int transfer_leadership_to(const PeerId& peer);
-
-
-    // Make this node enter readonly mode.
-    // Readonly mode should only be used to protect the system in some extreme cases.
-    // For exampe, in a storage system, too many write requests flood into the system
-    // unexpectly, and the system is in the danger of exhaust capacity. There's not enough
-    // time to add new machines, and wait for capacity balance. Once many disks become
-    // full, quorum dead happen to raft groups. One choice in this example is readonly
-    // mode, to let leader reject new write requests, but still handle reads request,
-    // and configuration changes.
-    // If a follower become readonly, the leader stop replicate new logs to it. This
-    // may cause the data far behind the leader, in the case that the leader is still
-    // writable. After the follower exit readonly mode, the leader will resume to
-    // replicate missing logs.
-    // A leader is readonly, if the node itself is readonly, or writable nodes (nodes that
-    // are not marked as readonly) in the group is less than majority. Once a leader become
-    // readonly, no new users logs will be acceptted.
-    void enter_readonly_mode();
-
-    // Node leave readonly node.
-    void leave_readonly_mode();
-
-    // Check if this node is readonly.
-    // There are two situations that if a node is readonly:
-    //      - This node is marked as readonly, by calling enter_readonly_mode();
-    //      - This node is a leader, and the count of writable nodes in the group
-    //        is less than the majority.
-    bool readonly();
-
-private:
-    NodeImpl* _impl;
-};
-
 
 class IteratorImpl;
 

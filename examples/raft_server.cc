@@ -11,11 +11,11 @@
 #include <gflags/gflags.h>
 
 
-DEFINE_string(conf, "127.0.0.1:8000:0,127.0.0.1:8001:0", "Initial configuration of the replication group");
+DEFINE_string(conf, "0.0.0.0:8000:0,0.0.0.0:8001:0", "Initial configuration of the replication group");
 DEFINE_int32(election_timeout_ms, 5000, 
             "Start election in such milliseconds if disconnect with the leader");
 DEFINE_bool(echo_attachment, true, "Echo attachment as well");
-DEFINE_string(data_path, "./data", "Path of data stored on");
+DEFINE_string(data_path, "data", "Path of data stored on");
 DEFINE_int32(port, 8000, "TCP Port of this server");
 DEFINE_string(listen_addr, "0.0.0.0", "Server listen address, may be IPV4/IPV6/UDS."
             " If this is set, the flag port will be ignored");

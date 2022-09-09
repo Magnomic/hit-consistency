@@ -7,7 +7,6 @@
 #include <brpc/server.h>
 #include <brpc/channel.h>
 #include "raft_message.pb.h"
-#include "node.h"
 
 using hit_consistency::RaftService;
 using hit_consistency::RequestVoteRequest;
@@ -19,6 +18,8 @@ class RaftSericeImpl final : public RaftService {
     RaftSericeImpl();
     ~RaftSericeImpl();
     void prevote(google::protobuf::RpcController* cntl_base, const RequestVoteRequest* request,
+                  RequestVoteResponse* response, google::protobuf::Closure* done);
+    void request_vote(google::protobuf::RpcController* cntl_base, const RequestVoteRequest* request,
                   RequestVoteResponse* response, google::protobuf::Closure* done);
 };
 

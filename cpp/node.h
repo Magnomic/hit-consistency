@@ -17,19 +17,27 @@
 #include <brpc/channel.h>
 
 #include "raft_message.pb.h"
+#include "errno.pb.h"
 
 #include "raft_service.h"
 #include "ballot.h"
+#include "log.h"
 #include "raft.h"
 #include "configuration_manager.h"
 #include "replicator.h"
 #include "configuration.h"
 #include "repeated_timer_task.h"
+#include "log_manager.h"
+#include "ballot_box.h"
 
 using hit_consistency::RaftService;
 using hit_consistency::RaftService_Stub;
 using hit_consistency::RequestVoteRequest;
 using hit_consistency::RequestVoteResponse;
+using hit_consistency::EHIGHERTERMRESPONSE;
+using hit_consistency::EVOTEFORCANDIDATE;
+using hit_consistency::EHIGHERTERMREQUEST;
+using hit_consistency::ERAFTTIMEDOUT;
 
 enum State {
     STATE_LEADER = 1,
@@ -42,6 +50,17 @@ enum State {
     STATE_SHUTDOWN = 8,
     STATE_END,
 };
+
+
+inline const char* state2str(State state) {
+    const char* str[] = {"LEADER", "TRANSFERRING", "CANDIDATE", "FOLLOWER", 
+                         "ERROR", "UNINITIALIZED", "SHUTTING", "SHUTDOWN", };
+    if (state < STATE_END) {
+        return str[(int)state - 1];
+    } else {
+        return "UNKNOWN";
+    }
+}
 
 
 class NodeImpl;
@@ -63,6 +82,18 @@ class ElectionTimer : public NodeTimer {
         int adjust_timeout_ms(int timeout_ms);
 };
 
+class VoteTimer : public NodeTimer {
+    protected:
+        void run();
+        int adjust_timeout_ms(int timeout_ms);
+};
+
+
+class StepdownTimer : public NodeTimer {
+    protected:
+        void run();
+};
+
 class NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
 
     private:
@@ -75,7 +106,13 @@ class NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
         
         PeerId _server_id;
 
+        PeerId _leader_id;
+        
+        PeerId _voted_id;
+
         int _current_term;
+
+        BallotBox* _ballot_box;
 
         Ballot _prevote_ctx;
 
@@ -91,7 +128,23 @@ class NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
 
         ElectionTimer _election_timer;
 
+        VoteTimer _vote_timer;
+        
+        StepdownTimer _stepdown_timer;
+
         raft::raft_mutex_t _mutex;
+
+        LogManager* _log_manager;
+        
+        LogStorage* _log_storage;
+
+        RaftMetaStorage* _meta_storage;
+
+        ConfigurationManager* _config_manager;
+  
+        ClosureQueue* _closure_queue;
+
+        ReplicatorGroup _replicator_group;
 
         NodeImpl();
         
@@ -116,12 +169,40 @@ class NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
 
         void prevote(std::unique_lock<raft::raft_mutex_t>* lck);
 
+        void vote(std::unique_lock<raft::raft_mutex_t>* lck);
+
         int handle_prevote(const RequestVoteRequest* request, RequestVoteResponse* response);
+
+        int handle_request_vote(const RequestVoteRequest* request, RequestVoteResponse* response);
 
         void handle_pre_vote_response(const PeerId& peer_id_, const int64_t term_, RequestVoteResponse response);
 
+        void handle_request_vote_response(const PeerId& peer_id_, const int64_t term_, RequestVoteResponse response);
+
+        void reset_leader_id(const PeerId& new_leader_id, const butil::Status& status);
+
+        void step_down(const int64_t term, bool wakeup_a_candidate, const butil::Status& status);
+
+        void check_dead_nodes(const Configuration& conf, int64_t now_ms);
+
+        void elect_self(std::unique_lock<raft::raft_mutex_t>* lck);
+
+        void become_leader();
+
         void handle_election_timeout();
 
+        void handle_vote_timeout();
+
+        void handle_stepdown_timeout();
+        
         void on_error(const Error& e);
+
+        int increase_term_to(int64_t new_term, const butil::Status& status);
+
+        int init_log_storage();
+
+        int init_meta_storage();
+
+        int init_fsm_caller(const LogId& bootstrap_id);
 };
 #endif 

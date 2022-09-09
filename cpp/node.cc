@@ -1,5 +1,47 @@
 #include "node.h"
 
+DEFINE_bool(raft_step_down_when_vote_timedout, true, 
+            "candidate steps down when reaching timeout");
+BRPC_VALIDATE_GFLAG(raft_step_down_when_vote_timedout, brpc::PassValidate);
+
+struct GlobalExtension {
+    SegmentLogStorage local_log;
+    LocalRaftMetaStorage local_meta;
+};
+
+static void global_init_or_die_impl() {
+    static GlobalExtension s_ext;
+
+    log_storage_extension()->RegisterOrDie("local", &s_ext.local_log);
+    meta_storage_extension()->RegisterOrDie("local", &s_ext.local_meta);
+}
+
+
+static void print_revision(std::ostream& os, void*) {
+#if defined(BRAFT_REVISION)
+        os << BRAFT_REVISION;
+#else
+        os << "undefined";
+#endif
+}
+
+static bvar::PassiveStatus<std::string> s_raft_revision(
+        "raft_revision", print_revision, NULL);
+
+
+static pthread_once_t global_init_once = PTHREAD_ONCE_INIT;
+
+
+// Non-static for unit test
+void global_init_once_or_die() {
+    if (pthread_once(&global_init_once, global_init_or_die_impl) != 0) {
+        PLOG(FATAL) << "Fail to pthread_once";
+        exit(-1);
+    }
+}
+
+
+
 NodeImpl::NodeImpl(){};
 
 NodeImpl::NodeImpl(const GroupId& group_id, const PeerId& peer_id){};
@@ -12,12 +54,28 @@ NodeImpl& NodeImpl::getInstance(){
 }
 
 int NodeImpl::init(NodeOptions node_options, const PeerId& peer_id){
-
+    global_init_once_or_die();
+    _options = NodeOptions(node_options);
     _conf.id = LogId();
     _conf.conf = _options.initial_conf;
     _server_id = peer_id;
 
     node_options.initial_conf.list_peers(&_peer_list);
+    _state = STATE_FOLLOWER;
+    
+    // log storage and log manager init
+    if (init_log_storage() != 0) {
+        LOG(ERROR) << "node " << _group_id << ":" << _server_id
+                   << " init_log_storage failed";
+        return -1;
+    }
+
+    // meta init
+    if (init_meta_storage() != 0) {
+        LOG(ERROR) << "node " << _group_id << ":" << _server_id
+                   << " init_meta_storage failed";
+        return -1;
+    }
     
     return 0;
 }
@@ -34,6 +92,7 @@ int NodeImpl::start(){
             return -1;
         }
     CHECK_EQ(0, _election_timer.init(this, 1000));
+    CHECK_EQ(0, _vote_timer.init(this, 1000));
 
     // Start the server.
     brpc::ServerOptions options;
@@ -81,9 +140,146 @@ struct OnPreVoteRPCDone : public google::protobuf::Closure {
     NodeImpl* node;
 };
 
+struct OnRequestVoteRPCDone : public google::protobuf::Closure {
+    OnRequestVoteRPCDone(const PeerId& peer_id_, const int64_t term_, NodeImpl* node_)
+        : peer(peer_id_), term(term_), node(node_) {
+            node->AddRef();
+    }
+    virtual ~OnRequestVoteRPCDone() {
+        node->Release();
+    }
+
+    void Run() {
+        do {
+            if (cntl.ErrorCode() != 0) {
+                LOG(WARNING) << "node " << node->node_id()
+                             << " received RequestVoteResponse from " << peer 
+	                         << " error: " << cntl.ErrorText();
+                break;
+            }
+            node->handle_request_vote_response(peer, term, response);
+        } while (0);
+        delete this;
+    }
+
+    PeerId peer;
+    int64_t term;
+    RequestVoteRequest request;
+    RequestVoteResponse response;
+    brpc::Controller cntl;
+    NodeImpl* node;
+};
+
 int NodeImpl::handle_prevote(const RequestVoteRequest* request, RequestVoteResponse* response){
-    LOG(INFO) << "Handling prevote from " << request->server_id();
-    response->set_term(request->term() + 1);
+    LOG(INFO) << "Handling prevote from " << request->server_id() << ", term = " << request->last_log_term() << ", index = " << request->last_log_index() << std::endl;
+    
+    std::unique_lock<raft::raft_mutex_t> lck(_mutex);
+
+    PeerId candidate_id;
+    if (0 != candidate_id.parse(request->server_id())) {
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " received PreVote from " << request->server_id()
+                     << " server_id bad format";
+        return EINVAL;
+    }
+
+    bool granted = false;
+
+    do {
+        if (request->term() < _current_term) {
+            // ignore older term
+            LOG(INFO) << "node " << _group_id << ":" << _server_id
+                      << " ignore PreVote from " << request->server_id()
+                      << " in term " << request->term()
+                      << " current_term " << _current_term;
+            break;
+        }
+
+        // get last_log_id outof node mutex
+        lck.unlock();
+        LogId last_log_id = _log_manager->last_log_id(true);
+        lck.lock();
+        // pre_vote not need ABA check after unlock&lock
+
+        granted = (LogId(request->last_log_index(), request->last_log_term())
+                        >= last_log_id);
+
+        LOG(INFO) << "node " << _group_id << ":" << _server_id
+                  << " received PreVote from " << request->server_id()
+                  << " in term " << request->term()
+                  << " current_term " << _current_term
+                  << " granted " << granted;
+
+    } while (0);
+
+    response->set_term(_current_term);
+    response->set_granted(granted);
+
+    return 0;
+}
+
+
+int NodeImpl::handle_request_vote(const RequestVoteRequest* request, RequestVoteResponse* response){
+    std::unique_lock<raft::raft_mutex_t> lck(_mutex);
+
+    PeerId candidate_id;
+    if (0 != candidate_id.parse(request->server_id())) {
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " received PreVote from " << request->server_id()
+                     << " server_id bad format";
+        return EINVAL;
+    }
+
+    do {
+        // check term
+        if (request->term() >= _current_term) {
+            LOG(INFO) << "node " << _group_id << ":" << _server_id
+                      << " received RequestVote from " << request->server_id()
+                      << " in term " << request->term()
+                      << " current_term " << _current_term;
+            // incress current term, change state to follower
+            if (request->term() > _current_term) {
+                butil::Status status;
+                status.set_error(EHIGHERTERMREQUEST, "Raft node receives higher term "
+                        "request_vote_request.");
+                step_down(request->term(), false, status);
+            }
+        } else {
+            // ignore older term
+            LOG(INFO) << "node " << _group_id << ":" << _server_id
+                      << " ignore RequestVote from " << request->server_id()
+                      << " in term " << request->term()
+                      << " current_term " << _current_term;
+            break;
+        }
+
+        // get last_log_id outof node mutex
+        lck.unlock();
+        LogId last_log_id = _log_manager->last_log_id(true);
+        lck.lock();
+        // vote need ABA check after unlock&lock
+        if (request->term() != _current_term) {
+            LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                         << " raise term " << _current_term << " when get last_log_id";
+            break;
+        }
+
+        bool log_is_ok = (LogId(request->last_log_index(), request->last_log_term())
+                          >= last_log_id);
+        // save
+        if (log_is_ok && _voted_id.is_empty()) {
+            butil::Status status;
+            status.set_error(EVOTEFORCANDIDATE, "Raft node votes for some candidate, "
+                    "step down to restart election_timer.");
+            step_down(request->term(), false, status);
+            _voted_id = candidate_id;
+            //TODO: outof lock
+            _meta_storage->set_votedfor(candidate_id);
+        }
+    } while (0);
+
+    response->set_term(_current_term);
+    response->set_granted(request->term() == _current_term && _voted_id == candidate_id);
     return 0;
 }
 
@@ -92,10 +288,13 @@ void NodeImpl::prevote(std::unique_lock<raft::raft_mutex_t>* lck){
     // Create a new ballot for pre-vote
     _prevote_ctx.init(_conf.conf, _conf.stable() ? NULL : &_conf.old_conf);
 
+    LOG(INFO)<< _log_manager->last_log_id();
+
+    const LogId lastLogId(_log_manager->last_log_id());
+
     for (std::set<PeerId>::const_iterator
             iter = _peer_list.begin(); iter != _peer_list.end(); ++iter) {
 
-        LOG(INFO) << *iter;
         if (*iter == _server_id){
             continue;
         }
@@ -112,16 +311,227 @@ void NodeImpl::prevote(std::unique_lock<raft::raft_mutex_t>* lck){
         done->request.set_server_id(_server_id.to_string());
         done->request.set_peer_id(iter->to_string());
         done->request.set_term(_current_term + 1); // next term
-        done->request.set_last_log_index(1);
-        done->request.set_last_log_term(0);
+        done->request.set_last_log_index(lastLogId.index);
+        done->request.set_last_log_term(lastLogId.term);
         RaftService_Stub stub(&channel);
         stub.prevote(&done->cntl, &done->request, &done->response, done);
     }
     
+    _prevote_ctx.grant(_server_id);
 }
 
-void NodeImpl::handle_pre_vote_response(const PeerId& peer_id_, const int64_t term_, RequestVoteResponse response){
+void NodeImpl::vote(std::unique_lock<raft::raft_mutex_t>* lck){
+    // Create a new ballot for pre-vote
+    _vote_ctx.init(_conf.conf, _conf.stable() ? NULL : &_conf.old_conf);
 
+    LOG(INFO)<< _log_manager->last_log_id();
+
+    const LogId lastLogId(_log_manager->last_log_id());
+    
+}
+
+void NodeImpl::handle_pre_vote_response(const PeerId& peer_id, const int64_t term, RequestVoteResponse response){
+
+    LOG(INFO) << "GOT RESPONSE";
+
+    std::unique_lock<raft::raft_mutex_t> lck(_mutex);
+
+    // check state
+    if (_state != STATE_FOLLOWER) {
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " received invalid PreVoteResponse from " << peer_id
+                     << " state not in STATE_FOLLOWER but " << state2str(_state);
+        return;
+    }
+    // check stale response
+    if (term != _current_term) {
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " received stale PreVoteResponse from " << peer_id
+                     << " term " << term << " current_term " << _current_term;
+        return;
+    }
+    // check response term
+    if (response.term() > _current_term) {
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " received invalid PreVoteResponse from " << peer_id
+                     << " term " << response.term() << " expect " << _current_term;
+        butil::Status status;
+        status.set_error(EHIGHERTERMRESPONSE, "Raft node receives higher term "
+                "pre_vote_response.");
+        step_down(response.term(), false, status);
+        return;
+    }
+
+    LOG(INFO) << "node " << _group_id << ":" << _server_id
+              << " received PreVoteResponse from " << peer_id
+              << " term " << response.term() << " granted " << response.granted();
+    // check if the quorum granted
+    if (response.granted()) {
+        _prevote_ctx.grant(peer_id);
+        if (_prevote_ctx.granted()) {
+            elect_self(&lck);
+        }
+    }
+}
+
+void NodeImpl::elect_self(std::unique_lock<raft::raft_mutex_t>* lck) {
+    LOG(INFO) << "node " << _group_id << ":" << _server_id
+              << " term " << _current_term << " start vote and grant vote self";
+    if (!_conf.contains(_server_id)) {
+        LOG(WARNING) << "node " << _group_id << ':' << _server_id
+                     << " can't do elect_self as it is not in " << _conf.conf;
+        return;
+    }
+    // cancel follower election timer
+    if (_state == STATE_FOLLOWER) {
+        BRAFT_VLOG << "node " << _group_id << ":" << _server_id
+                   << " term " << _current_term << " stop election_timer";
+        _election_timer.stop();
+    }
+    // reset leader_id before vote
+    PeerId empty_id;
+    butil::Status status;
+    status.set_error(ERAFTTIMEDOUT,
+            "A follower's leader_id is reset to NULL "
+            "as it begins to request_vote.");
+    reset_leader_id(empty_id, status);
+
+    _state = STATE_CANDIDATE;
+    _current_term++;
+    _voted_id = _server_id;
+
+    BRAFT_VLOG << "node " << _group_id << ":" << _server_id
+               << " term " << _current_term << " start vote_timer";
+    _vote_timer.start();
+
+    _vote_ctx.init(_conf.conf, _conf.stable() ? NULL : &_conf.old_conf);
+
+    int64_t old_term = _current_term;
+    // get last_log_id outof node mutex
+    lck->unlock();
+    const LogId last_log_id = _log_manager->last_log_id(true);
+    lck->lock();
+    // vote need defense ABA after unlock&lock
+    if (old_term != _current_term) {
+        // term changed cause by step_down
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " raise term " << _current_term << " when get last_log_id";
+        return;
+    }
+    std::set<PeerId> peers;
+    _conf.list_peers(&peers);
+
+    for (std::set<PeerId>::const_iterator
+        iter = peers.begin(); iter != peers.end(); ++iter) {
+        if (*iter == _server_id) {
+            continue;
+        }
+        brpc::ChannelOptions options;
+        options.connection_type = brpc::CONNECTION_TYPE_SINGLE;
+        options.max_retry = 0;
+        brpc::Channel channel;
+        if (0 != channel.Init(iter->addr, &options)) {
+            LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                         << " channel init failed, addr " << iter->addr;
+            continue;
+        }
+
+        OnRequestVoteRPCDone* done = new OnRequestVoteRPCDone(*iter, _current_term, this);
+        done->cntl.set_timeout_ms(_options.election_timeout_ms);
+        done->request.set_server_id(_server_id.to_string());
+        done->request.set_peer_id(iter->to_string());
+        done->request.set_term(_current_term);
+        done->request.set_last_log_index(last_log_id.index);
+        done->request.set_last_log_term(last_log_id.term);
+
+        RaftService_Stub stub(&channel);
+        stub.request_vote(&done->cntl, &done->request, &done->response, done);
+    }
+
+    //TODO: outof lock
+    _meta_storage->set_term_and_votedfor(_current_term, _server_id);
+    _vote_ctx.grant(_server_id);
+    if (_vote_ctx.granted()) {
+        become_leader();
+    }
+}
+
+void NodeImpl::handle_request_vote_response(const PeerId& peer_id, const int64_t term, RequestVoteResponse response){
+    BAIDU_SCOPED_LOCK(_mutex);
+
+    // check state
+    if (_state != STATE_CANDIDATE) {
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " received invalid RequestVoteResponse from " << peer_id
+                     << " state not in CANDIDATE but " << state2str(_state);
+        return;
+    }
+    // check stale response
+    if (term != _current_term) {
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " received stale RequestVoteResponse from " << peer_id
+                     << " term " << term << " current_term " << _current_term;
+        return;
+    }
+    // check response term
+    if (response.term() > _current_term) {
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " received invalid RequestVoteResponse from " << peer_id
+                     << " term " << response.term() << " expect " << _current_term;
+        butil::Status status;
+        status.set_error(EHIGHERTERMRESPONSE, "Raft node receives higher term "
+                "request_vote_response.");
+        step_down(response.term(), false, status);
+        return;
+    }
+
+    LOG(INFO) << "node " << _group_id << ":" << _server_id
+              << " received RequestVoteResponse from " << peer_id
+              << " term " << response.term() << " granted " << response.granted();
+
+    // check if the quorum granted
+    if (response.granted()) {
+        _vote_ctx.grant(peer_id);
+        if (_vote_ctx.granted()) {
+            become_leader();
+        }
+    }
+}
+
+void NodeImpl::become_leader(){    
+    
+    CHECK(_state == STATE_CANDIDATE);
+    LOG(INFO) << "node " << _group_id << ":" << _server_id
+              << " term " << _current_term
+              << " become leader of group " << _conf.conf
+              << " " << _conf.old_conf;
+    // cancel candidate vote timer
+    _vote_timer.stop();
+
+    _state = STATE_LEADER;
+    _leader_id = _server_id;
+
+    _replicator_group.reset_term(_current_term);
+
+    std::set<PeerId> peers;
+    _conf.list_peers(&peers);
+    for (std::set<PeerId>::const_iterator
+            iter = peers.begin(); iter != peers.end(); ++iter) {
+        if (*iter == _server_id) {
+            continue;
+        }
+
+        BRAFT_VLOG << "node " << _group_id << ":" << _server_id
+                   << " term " << _current_term
+                   << " add replicator " << *iter;
+        //TODO: check return code
+        _replicator_group.add_replicator(*iter);
+    }
+
+    // init commit manager
+    _ballot_box->reset_pending_index(_log_manager->last_log_index() + 1);
+
+    _stepdown_timer.start();
 }
 
 void NodeImpl::handle_election_timeout() {
@@ -129,12 +539,184 @@ void NodeImpl::handle_election_timeout() {
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
 
     return prevote(&lck);
+    
 }
 
+
+void NodeImpl::handle_vote_timeout() {
+
+    std::unique_lock<raft::raft_mutex_t> lck(_mutex);
+
+    // check state
+    if (_state != STATE_CANDIDATE) {
+    	return;
+    }
+    if (FLAGS_raft_step_down_when_vote_timedout) {
+        // step down to follower
+        LOG(WARNING) << "node " << node_id()
+                     << " term " << _current_term
+                     << " steps down when reaching vote timeout:"
+                        " fail to get quorum vote-granted";
+        butil::Status status;
+        status.set_error(ERAFTTIMEDOUT, "Fail to get quorum vote-granted");
+        step_down(_current_term, false, status);
+        prevote(&lck);
+    } else {
+        // retry vote
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " term " << _current_term << " retry elect";
+        elect_self(&lck);
+    }
+    
+}
+
+
+void NodeImpl::handle_stepdown_timeout() {
+    BAIDU_SCOPED_LOCK(_mutex);
+
+    // check state
+    if (_state > STATE_TRANSFERRING) {
+        BRAFT_VLOG << "node " << _group_id << ":" << _server_id
+            << " term " << _current_term << " stop stepdown_timer"
+            << " state is " << state2str(_state);
+        return;
+    }
+
+    int64_t now = butil::monotonic_time_ms();
+    if (!_conf.old_conf.empty()) {
+        check_dead_nodes(_conf.old_conf, now);
+    }
+}
+
+void NodeImpl::check_dead_nodes(const Configuration& conf, int64_t now_ms) {
+    std::vector<PeerId> peers;
+    conf.list_peers(&peers);
+    size_t alive_count = 0;
+    Configuration dead_nodes;  // for easily print
+    for (size_t i = 0; i < peers.size(); i++) {
+        if (peers[i] == _server_id) {
+            ++alive_count;
+            continue;
+        }
+
+        if (now_ms - _replicator_group.last_rpc_send_timestamp(peers[i])
+                <= _options.election_timeout_ms) {
+            ++alive_count;
+            continue;
+        }
+        dead_nodes.add_peer(peers[i]);
+    }
+    if (alive_count >= peers.size() / 2 + 1) {
+        return;
+    }
+    LOG(WARNING) << "node " << node_id()
+                 << " term " << _current_term
+                 << " steps down when alive nodes don't satisfy quorum"
+                    " dead_nodes: " << dead_nodes
+                 << " conf: " << conf;
+    butil::Status status;
+    status.set_error(ERAFTTIMEDOUT, "Majority of the group dies");
+    step_down(_current_term, false, status);
+}
 
 void NodeImpl::on_error(const Error& e){
 
 }
+
+int NodeImpl::increase_term_to(int64_t new_term, const butil::Status& status) {
+    BAIDU_SCOPED_LOCK(_mutex);
+    if (new_term <= _current_term) {
+        return EINVAL;
+    }
+    step_down(new_term, false, status);
+    return 0;
+}
+
+int NodeImpl::init_log_storage() {
+    if (_options.log_storage) {
+        _log_storage = _options.log_storage;
+    } else {
+        _log_storage = LogStorage::create(_options.log_uri);
+    }
+    if (!_log_storage) {
+        LOG(ERROR) << "node " << _group_id << ":" << _server_id
+                   << " find log storage failed, uri " << _options.log_uri;
+        return -1;
+    }
+    _log_manager = new LogManager();
+    LogManagerOptions log_manager_options;
+    log_manager_options.log_storage = _log_storage;
+    log_manager_options.configuration_manager = _config_manager;
+    return _log_manager->init(log_manager_options);
+}
+
+int NodeImpl::init_meta_storage() {
+    int ret = 0;
+
+    do {
+        _meta_storage = RaftMetaStorage::create(_options.raft_meta_uri);
+        if (!_meta_storage) {
+            LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                << " find meta storage failed, uri " << _options.raft_meta_uri;
+            ret = ENOENT;
+            break;
+        }
+
+        ret = _meta_storage->init();
+        if (ret != 0) {
+            LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                         << " init meta storage failed, uri " << _options.raft_meta_uri
+                         << " ret " << ret;
+            break;
+        }
+
+        _current_term = _meta_storage->get_term();
+        ret = _meta_storage->get_votedfor(&_voted_id);
+        if (ret != 0) {
+            LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                         << " meta storage get_votedfor failed, uri " 
+                         << _options.raft_meta_uri << " ret " << ret;
+            break;
+        }
+    } while (0);
+
+    return ret;
+}
+
+void NodeImpl::step_down(const int64_t term, bool wakeup_a_candidate, 
+                         const butil::Status& status) {
+    // reset leader_id 
+    PeerId empty_id;
+    reset_leader_id(empty_id, status);
+
+    if (_state == STATE_CANDIDATE){
+        _vote_timer.stop();
+    }
+
+    // soft state in memory
+    _state = STATE_FOLLOWER;
+
+    _election_timer.start();
+
+    // meta state
+    if (term > _current_term) {
+        _current_term = term;
+        _voted_id.reset();
+        //TODO: outof lock
+        _meta_storage->set_term_and_votedfor(term, _voted_id);
+    }
+
+}
+
+void NodeImpl::reset_leader_id(const PeerId& new_leader_id, 
+        const butil::Status& status) {
+    if (new_leader_id.is_empty()) {
+        _leader_id.reset();
+    } else {
+        _leader_id = new_leader_id;
+    }
+}
+
 
 // Timers
 int NodeTimer::init(NodeImpl* node, int timeout_ms) {
@@ -164,3 +746,14 @@ int ElectionTimer::adjust_timeout_ms(int timeout_ms) {
     return random_timeout(timeout_ms);
 }
 
+void VoteTimer::run() {
+    _node->handle_vote_timeout();
+}
+
+int VoteTimer::adjust_timeout_ms(int timeout_ms) {
+    return random_timeout(timeout_ms);
+}
+
+void StepdownTimer::run() {
+    _node->handle_stepdown_timeout();
+}
