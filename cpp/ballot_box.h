@@ -42,24 +42,12 @@ public:
     int commit_at(int64_t first_log_index, int64_t last_log_index,
                   const PeerId& peer);
 
-    // Called when the leader steps down, otherwise the behavior is undefined
-    // When a leader steps down, the uncommitted user applications should 
-    // fail immediately, which the new leader will deal whether to commit or
-    // truncate.
-    int clear_pending_tasks();
-    
     // Called when a candidate becomes the new leader, otherwise the behavior is
     // undefined.
     // According the the raft algorithm, the logs from pervious terms can't be 
     // committed until a log at the new term becomes committed, so 
     // |new_pending_index| should be |last_log_index| + 1.
     int reset_pending_index(int64_t new_pending_index);
-
-    // Called by leader, otherwise the behavior is undefined
-    // Store application context before replication.
-    int append_pending_task(const Configuration& conf, 
-                            const Configuration* old_conf,
-                            Closure* closure);
 
     // Called by follower, otherwise the behavior is undefined.
     // Set commited index received from leader
@@ -72,10 +60,9 @@ public:
 
     void get_status(BallotBoxStatus* ballot_box_status);
 
+    int clear_pending_tasks();
 private:
-
-    FSMCaller*                                      _waiter;
-    ClosureQueue*                                   _closure_queue;                            
+                   
     raft::raft_mutex_t                              _mutex;
     butil::atomic<int64_t>                          _last_committed_index;
     int64_t                                         _pending_index;

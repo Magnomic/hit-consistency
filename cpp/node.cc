@@ -9,6 +9,11 @@ struct GlobalExtension {
     LocalRaftMetaStorage local_meta;
 };
 
+DEFINE_int32(raft_election_heartbeat_factor, 10, "raft election:heartbeat timeout factor");
+static inline int heartbeat_timeout(int election_timeout) {
+    return std::max(election_timeout / FLAGS_raft_election_heartbeat_factor, 10);
+}
+
 static void global_init_or_die_impl() {
     static GlobalExtension s_ext;
 
@@ -40,7 +45,89 @@ void global_init_once_or_die() {
     }
 }
 
+class FollowerStableClosure : public LogManager::StableClosure {
+public:
+    FollowerStableClosure(
+            brpc::Controller* cntl,
+            const AppendEntriesRequest* request,
+            AppendEntriesResponse* response,
+            google::protobuf::Closure* done,
+            NodeImpl* node,
+            int64_t term)
+        : _cntl(cntl)
+        , _request(request)
+        , _response(response)
+        , _done(done)
+        , _node(node)
+        , _term(term)
+    {
+        _node->AddRef();
+    }
+    void Run() {
+        run();
+        delete this;
+    }
+private:
+    ~FollowerStableClosure() {
+        if (_node) {
+            _node->Release();
+        }
+    }
+    void run() {
+        brpc::ClosureGuard done_guard(_done);
+        if (!status().ok()) {
+            _cntl->SetFailed(status().error_code(), "%s",
+                             status().error_cstr());
+            return;
+        }
+        std::unique_lock<raft::raft_mutex_t> lck(_node->_mutex);
+        if (_term != _node->_current_term) {
+            // The change of term indicates that leader has been changed during
+            // appending entries, so we can't respond ok to the old leader
+            // because we are not sure if the appended logs would be truncated
+            // by the new leader:
+            //  - If they won't be truncated and we respond failure to the old
+            //    leader, the new leader would know that they are stored in this
+            //    peer and they will be eventually committed when the new leader
+            //    found that quorum of the cluster have stored.
+            //  - If they will be truncated and we responded success to the old
+            //    leader, the old leader would possibly regard those entries as
+            //    committed (very likely in a 3-nodes cluster) and respond
+            //    success to the clients, which would break the rule that
+            //    committed entries would never be truncated.
+            // So we have to respond failure to the old leader and set the new
+            // term to make it stepped down if it didn't.
+            _response->set_success(false);
+            _response->set_term(_node->_current_term);
+            return;
+        }
+        // It's safe to release lck as we know everything is ok at this point.
+        lck.unlock();
 
+        // DON'T touch _node any more
+        _response->set_success(true);
+        _response->set_term(_term);
+
+        const int64_t committed_index =
+                std::min(_request->committed_index(),
+                         // ^^^ committed_index is likely less than the
+                         // last_log_index
+                         _request->prev_log_index() + _request->entries_size()
+                         // ^^^ The logs after the appended entries are
+                         // untrustable so we can't commit them even if their
+                         // indexes are less than request->committed_index()
+                        );
+        //_ballot_box is thread safe and tolerats disorder.
+        _node->_ballot_box->set_last_committed_index(committed_index);
+    }
+
+    brpc::Controller* _cntl;
+    const AppendEntriesRequest* _request;
+    AppendEntriesResponse* _response;
+    google::protobuf::Closure* _done;
+    NodeImpl* _node;
+    int64_t _term;
+};
 
 NodeImpl::NodeImpl(){};
 
@@ -53,16 +140,16 @@ NodeImpl& NodeImpl::getInstance(){
         return instance;
 }
 
-int NodeImpl::init(NodeOptions node_options, const PeerId& peer_id){
+int NodeImpl::init(NodeOptions node_options, const GroupId& group_id, const PeerId& peer_id){
+    _group_id = group_id;
+
     global_init_once_or_die();
     _options = NodeOptions(node_options);
     _conf.id = LogId();
     _conf.conf = _options.initial_conf;
     _server_id = peer_id;
-
     node_options.initial_conf.list_peers(&_peer_list);
-    _state = STATE_FOLLOWER;
-    
+
     // log storage and log manager init
     if (init_log_storage() != 0) {
         LOG(ERROR) << "node " << _group_id << ":" << _server_id
@@ -76,6 +163,27 @@ int NodeImpl::init(NodeOptions node_options, const PeerId& peer_id){
                    << " init_meta_storage failed";
         return -1;
     }
+
+    // commitment manager init
+    _ballot_box = new BallotBox();
+    BallotBoxOptions ballot_box_options;
+    if (_ballot_box->init(ballot_box_options) != 0) {
+        LOG(ERROR) << "node " << _group_id << ":" << _server_id
+                   << " init _ballot_box failed";
+        return -1;
+    }
+    
+    // init replicator
+    ReplicatorGroupOptions rg_options;
+    rg_options.heartbeat_timeout_ms = heartbeat_timeout(_options.election_timeout_ms);
+    rg_options.election_timeout_ms = _options.election_timeout_ms;
+    rg_options.log_manager = _log_manager;
+    rg_options.ballot_box = _ballot_box;
+    rg_options.node = this;
+
+    _replicator_group.init(NodeId(_group_id, _server_id), rg_options);
+
+    _state = STATE_FOLLOWER;
     
     return 0;
 }
@@ -534,9 +642,215 @@ void NodeImpl::become_leader(){
     _stepdown_timer.start();
 }
 
+void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
+                                        const AppendEntriesRequest* request,
+                                        AppendEntriesResponse* response,
+                                        google::protobuf::Closure* done,
+                                        bool from_append_entries_cache){
+    std::vector<LogEntry*> entries;
+    entries.reserve(request->entries_size());
+    brpc::ClosureGuard done_guard(done);
+    std::unique_lock<raft::raft_mutex_t> lck(_mutex);
+
+    // pre set term, to avoid get term in lock
+    response->set_term(_current_term);
+
+    PeerId server_id;
+    if (0 != server_id.parse(request->server_id())) {
+        lck.unlock();
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " received AppendEntries from " << request->server_id()
+                     << " server_id bad format";
+        cntl->SetFailed(brpc::EREQUEST,
+                        "Fail to parse server_id `%s'",
+                        request->server_id().c_str());
+        return;
+    }
+
+    // check stale term
+    if (request->term() < _current_term) {
+        const int64_t saved_current_term = _current_term;
+        lck.unlock();
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " ignore stale AppendEntries from " << request->server_id()
+                     << " in term " << request->term()
+                     << " current_term " << saved_current_term;
+        response->set_success(false);
+        response->set_term(saved_current_term);
+        return;
+    }
+    
+    // check term and state to step down
+    check_step_down(request->term(), server_id);   
+
+    if (server_id != _leader_id) {
+        LOG(ERROR) << "Another peer " << _group_id << ":" << server_id
+                   << " declares that it is the leader at term=" << _current_term 
+                   << " which was occupied by leader=" << _leader_id;
+        // Increase the term by 1 and make both leaders step down to minimize the
+        // loss of split brain
+        butil::Status status;
+        status.set_error(ELEADERCONFLICT, "More than one leader in the same term."); 
+        step_down(request->term() + 1, false, status);
+        response->set_success(false);
+        response->set_term(request->term() + 1);
+        return;
+    }
+
+    if (!from_append_entries_cache) {
+        // Requests from cache already updated timestamp
+        _last_leader_timestamp = butil::monotonic_time_ms();
+    }
+
+    const int64_t prev_log_index = request->prev_log_index();
+    const int64_t prev_log_term = request->prev_log_term();
+    const int64_t local_prev_log_term = _log_manager->get_term(prev_log_index);
+    if (local_prev_log_term != prev_log_term) {
+        int64_t last_index = _log_manager->last_log_index();
+        int64_t saved_term = request->term();
+        int     saved_entries_size = request->entries_size();
+        std::string rpc_server_id = request->server_id();
+        if (!from_append_entries_cache /*&& handle_out_of_order_append_entries(cntl, request, response, done, last_index) */) {
+            // It's not safe to touch cntl/request/response/done after this point,
+            // since the ownership is tranfered to the cache.
+            lck.unlock();
+            done_guard.release();
+            LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                         << " cache out-of-order AppendEntries from " 
+                         << rpc_server_id
+                         << " in term " << saved_term
+                         << " prev_log_index " << prev_log_index
+                         << " prev_log_term " << prev_log_term
+                         << " local_prev_log_term " << local_prev_log_term
+                         << " last_log_index " << last_index
+                         << " entries_size " << saved_entries_size;
+            return;
+        }
+
+        response->set_success(false);
+        response->set_term(_current_term);
+        response->set_last_log_index(last_index);
+        lck.unlock();
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " reject term_unmatched AppendEntries from " 
+                     << request->server_id()
+                     << " in term " << request->term()
+                     << " prev_log_index " << request->prev_log_index()
+                     << " prev_log_term " << request->prev_log_term()
+                     << " local_prev_log_term " << local_prev_log_term
+                     << " last_log_index " << last_index
+                     << " entries_size " << request->entries_size()
+                     << " from_append_entries_cache: " << from_append_entries_cache;
+        return;
+    }
+
+    if (request->entries_size() == 0) {
+        response->set_success(true);
+        response->set_term(_current_term);
+        response->set_last_log_index(_log_manager->last_log_index());
+        response->set_readonly(false);
+        lck.unlock();
+        // see the comments at FollowerStableClosure::run()
+        _ballot_box->set_last_committed_index(
+                std::min(request->committed_index(),
+                         prev_log_index));
+        return;
+    }
+
+    // Parse request
+    butil::IOBuf data_buf;
+    data_buf.swap(cntl->request_attachment());
+    int64_t index = prev_log_index;
+    for (int i = 0; i < request->entries_size(); i++) {
+        index++;
+        const EntryMeta& entry = request->entries(i);
+        if (entry.type() != ENTRY_TYPE_UNKNOWN) {
+            LogEntry* log_entry = new LogEntry();
+            log_entry->AddRef();
+            log_entry->id.term = entry.term();
+            log_entry->id.index = index;
+            log_entry->type = (EntryType)entry.type();
+            if (entry.peers_size() > 0) {
+                log_entry->peers = new std::vector<PeerId>;
+                for (int i = 0; i < entry.peers_size(); i++) {
+                    log_entry->peers->push_back(entry.peers(i));
+                }
+                CHECK_EQ(log_entry->type, ENTRY_TYPE_CONFIGURATION);
+                if (entry.old_peers_size() > 0) {
+                    log_entry->old_peers = new std::vector<PeerId>;
+                    for (int i = 0; i < entry.old_peers_size(); i++) {
+                        log_entry->old_peers->push_back(entry.old_peers(i));
+                    }
+                }
+            } else {
+                CHECK_NE(entry.type(), ENTRY_TYPE_CONFIGURATION);
+            }
+            if (entry.has_data_len()) {
+                int len = entry.data_len();
+                data_buf.cutn(&log_entry->data, len);
+            }
+            entries.push_back(log_entry);
+        }
+    }
+
+    // // check out-of-order cache
+    // check_append_entries_cache(index);
+
+    FollowerStableClosure* c = new FollowerStableClosure(
+            cntl, request, response, done_guard.release(),
+            this, _current_term);
+    _log_manager->append_entries(&entries, c);
+
+    // update configuration after _log_manager updated its memory status
+    _log_manager->check_and_set_configuration(&_conf);
+
+}
+
+// in lock
+void NodeImpl::check_step_down(const int64_t request_term, const PeerId& server_id) {
+    butil::Status status;
+    if (request_term > _current_term) {
+        status.set_error(ENEWLEADER, "Raft node receives message from "
+                "new leader with higher term."); 
+        step_down(request_term, false, status);
+    } else if (_state != STATE_FOLLOWER) { 
+        status.set_error(ENEWLEADER, "Candidate receives message "
+                "from new leader with the same term.");
+        step_down(request_term, false, status);
+    } else if (_leader_id.is_empty()) {
+        status.set_error(ENEWLEADER, "Follower receives message "
+                "from new leader with the same term.");
+        step_down(request_term, false, status); 
+    }
+    // save current leader
+    if (_leader_id.is_empty()) { 
+        reset_leader_id(server_id, status);
+    }
+}
+
 void NodeImpl::handle_election_timeout() {
 
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
+    // check state
+    if (_state != STATE_FOLLOWER) {
+        return;
+    }
+
+    // check timestamp, skip one cycle check when trigger vote
+    if (!_vote_triggered &&
+            (butil::monotonic_time_ms() - _last_leader_timestamp) 
+            < _options.election_timeout_ms) {
+        return;
+    }
+
+    _vote_triggered = false;
+
+    // Reset leader as the leader is uncerntain on election timeout.
+    PeerId empty_id;
+    butil::Status status;
+    status.set_error(ERAFTTIMEDOUT, "Lost connection from leader %s",
+                                    _leader_id.to_string().c_str());
+    reset_leader_id(empty_id, status);
 
     return prevote(&lck);
     
@@ -689,8 +1003,13 @@ void NodeImpl::step_down(const int64_t term, bool wakeup_a_candidate,
     PeerId empty_id;
     reset_leader_id(empty_id, status);
 
-    if (_state == STATE_CANDIDATE){
+    // delete timer and something else
+    if (_state == STATE_CANDIDATE) {
         _vote_timer.stop();
+    } else if (_state <= STATE_TRANSFERRING) {
+        _stepdown_timer.stop();
+
+        _ballot_box->clear_pending_tasks();
     }
 
     // soft state in memory

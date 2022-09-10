@@ -15,6 +15,7 @@
 #include <butil/iobuf.h>
 #include <brpc/server.h>
 #include <brpc/channel.h>
+#include <brpc/callback.h>
 
 #include "raft_message.pb.h"
 #include "errno.pb.h"
@@ -34,10 +35,13 @@ using hit_consistency::RaftService;
 using hit_consistency::RaftService_Stub;
 using hit_consistency::RequestVoteRequest;
 using hit_consistency::RequestVoteResponse;
+using hit_consistency::EntryType;
 using hit_consistency::EHIGHERTERMRESPONSE;
 using hit_consistency::EVOTEFORCANDIDATE;
 using hit_consistency::EHIGHERTERMREQUEST;
 using hit_consistency::ERAFTTIMEDOUT;
+using hit_consistency::ENEWLEADER;
+using hit_consistency::ELEADERCONFLICT;
 
 enum State {
     STATE_LEADER = 1,
@@ -94,7 +98,9 @@ class StepdownTimer : public NodeTimer {
         void run();
 };
 
-class NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
+class BAIDU_CACHELINE_ALIGNMENT NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
+
+friend class FollowerStableClosure;
 
     private:
 
@@ -121,10 +127,14 @@ class NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
         ConfigurationEntry _conf;
 
         NodeOptions _options;
+   
+        int64_t _last_leader_timestamp;
 
         State _state;
 
         int _server_timeout;
+
+        bool _vote_triggered;
 
         ElectionTimer _election_timer;
 
@@ -145,6 +155,8 @@ class NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
         ClosureQueue* _closure_queue;
 
         ReplicatorGroup _replicator_group;
+        
+        std::vector<Closure*> _shutdown_continuations;
 
         NodeImpl();
         
@@ -163,7 +175,7 @@ class NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
         }
         static NodeImpl& getInstance();
 
-        int init(NodeOptions node_options, const PeerId& peer_id);
+        int init(NodeOptions node_options, const GroupId& group_id, const PeerId& peer_id);
 
         int start();
 
@@ -178,6 +190,12 @@ class NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
         void handle_pre_vote_response(const PeerId& peer_id_, const int64_t term_, RequestVoteResponse response);
 
         void handle_request_vote_response(const PeerId& peer_id_, const int64_t term_, RequestVoteResponse response);
+
+        void handle_append_entries_request(brpc::Controller* cntl,
+                                             const AppendEntriesRequest* request,
+                                             AppendEntriesResponse* response,
+                                             google::protobuf::Closure* done,
+                                             bool from_append_entries_cache);
 
         void reset_leader_id(const PeerId& new_leader_id, const butil::Status& status);
 
@@ -203,6 +221,6 @@ class NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
 
         int init_meta_storage();
 
-        int init_fsm_caller(const LogId& bootstrap_id);
+        void check_step_down(const int64_t request_term, const PeerId& server_id);
 };
 #endif 

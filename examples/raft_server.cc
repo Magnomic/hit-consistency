@@ -25,6 +25,7 @@ DEFINE_int32(logoff_ms, 2000, "Maximum duration of server's LOGOFF state "
              "(waiting for client to close connection before server stops)");
 DEFINE_int32(snapshot_interval, 30, "Interval between each snapshot");
 DEFINE_bool(disable_cli, false, "Don't allow raft_cli access this node");
+DEFINE_string(group, "Atomic", "Id of the replication group");
 
 
 int main(int argc, char** argv) {
@@ -51,7 +52,7 @@ int main(int argc, char** argv) {
     node_options.snapshot_uri = prefix + "/snapshot";
     node_options.disable_cli = FLAGS_disable_cli;
 
-    node.init(node_options, PeerId(addr));
+    node.init(node_options, FLAGS_group, PeerId(addr));
 
     node.start();
  

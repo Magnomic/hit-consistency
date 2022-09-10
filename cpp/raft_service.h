@@ -11,6 +11,8 @@
 using hit_consistency::RaftService;
 using hit_consistency::RequestVoteRequest;
 using hit_consistency::RequestVoteResponse;
+using hit_consistency::AppendEntriesRequest;
+using hit_consistency::AppendEntriesResponse;
 
 
 class RaftSericeImpl final : public RaftService {
@@ -21,6 +23,8 @@ class RaftSericeImpl final : public RaftService {
                   RequestVoteResponse* response, google::protobuf::Closure* done);
     void request_vote(google::protobuf::RpcController* cntl_base, const RequestVoteRequest* request,
                   RequestVoteResponse* response, google::protobuf::Closure* done);
+    void append_entries(google::protobuf::RpcController* cntl_base, const AppendEntriesRequest* request,
+                  AppendEntriesResponse* response, google::protobuf::Closure* done);
 };
 
 #endif 

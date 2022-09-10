@@ -87,7 +87,6 @@ struct NodeOptions {
     // Default: null
     LogStorage* log_storage;
 
-
     // If |node_owns_fsm| is true. |fms| would be destroyed when the backing
     // Node is no longer referenced.
     //
