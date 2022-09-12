@@ -1,81 +1,69 @@
 #include <iostream>
 #include <memory>
 #include <string>
-#include <chrono>
-#include <thread>
-#include <functional>
-
-#include <gflags/gflags.h>
-#include <butil/logging.h>
-#include <butil/time.h>
-#include <brpc/channel.h>
-
 #include "raft_message.pb.h"
-#include "cpp/raft_service.h"
+#include "cpp/node.h"
+#include "cpp/raft.h"
+#include "cpp/configuration.h"
+
+#include <butil/logging.h>
+#include <brpc/server.h>
+#include <gflags/gflags.h>
+
+
+DEFINE_string(conf, "0.0.0.0:8000:0,0.0.0.0:8001:0", "Initial configuration of the replication group");
+DEFINE_int32(election_timeout_ms, 5000, 
+            "Start election in such milliseconds if disconnect with the leader");
+DEFINE_bool(echo_attachment, true, "Echo attachment as well");
+DEFINE_string(data_path, "data", "Path of data stored on");
+DEFINE_int32(port, 8000, "TCP Port of this server");
+DEFINE_string(listen_addr, "0.0.0.0", "Server listen address, may be IPV4/IPV6/UDS."
+            " If this is set, the flag port will be ignored");
+DEFINE_int32(idle_timeout_s, -1, "Connection will be closed if there is no "
+             "read/write operations during the last `idle_timeout_s'");
+DEFINE_int32(logoff_ms, 2000, "Maximum duration of server's LOGOFF state "
+             "(waiting for client to close connection before server stops)");
+DEFINE_int32(snapshot_interval, 30, "Interval between each snapshot");
+DEFINE_bool(disable_cli, false, "Don't allow raft_cli access this node");
+DEFINE_string(group, "Atomic", "Id of the replication group");
 
 using hit_consistency::RaftService_Stub;
-using hit_consistency::RequestVoteRequest;
-using hit_consistency::RequestVoteResponse;
+using hit_consistency::ClientRequest;
+using hit_consistency::ClientResponse;
 
-DEFINE_string(attachment, "", "Carry this along with requests");
-DEFINE_string(protocol, "baidu_std", "Protocol type. Defined in src/brpc/options.proto");
-DEFINE_string(connection_type, "", "Connection type. Available values: single, pooled, short");
-DEFINE_string(server, "0.0.0.0:8000", "IP Address of server");
-DEFINE_string(load_balancer, "", "The algorithm for load balancing");
-DEFINE_int32(timeout_ms, 100, "RPC timeout in milliseconds");
-DEFINE_int32(max_retry, 3, "Max retries(not including the first RPC)"); 
-DEFINE_int32(interval_ms, 1000, "Milliseconds between consecutive requests");
 
 int main(int argc, char** argv) {
-  google::ParseCommandLineFlags(&argc, &argv, true);
-  brpc::Channel channel;
-    
-    // Initialize the channel, NULL means using default options.
-    brpc::ChannelOptions options;
-    options.protocol = FLAGS_protocol;
-    options.connection_type = FLAGS_connection_type;
-    options.timeout_ms = FLAGS_timeout_ms/*milliseconds*/;
-    options.max_retry = FLAGS_max_retry;
-    if (channel.Init(FLAGS_server.c_str(), FLAGS_load_balancer.c_str(), &options) != 0) {
-        LOG(ERROR) << "Fail to initialize channel";
-        return -1;
+
+    google::ParseCommandLineFlags(&argc, &argv, true);
+
+    std::string leader_addr("0.0.0.0:8000");
+
+    brpc::Channel channel;
+    if (channel.Init(leader_addr, NULL) != 0) {
+        LOG(ERROR) << "Fail to init channel to " << leader_addr;
+            bthread_usleep(1 * 1000L);
     }
 
-    // Normally, you should not call a Channel directly, but instead construct
-    // a stub Service wrapping it. stub can be shared by all threads as well.
-    RaftService_Stub stub(&channel);
+    hit_consistency::RaftService_Stub stub(&channel);
+    brpc::Controller cntl;
+    cntl.set_timeout_ms(5000);
+    // Randomly select which request we want send;
+    hit_consistency::ClientResponse response;
 
-    // Send a request and wait for the response every 1 second.
-    int log_id = 0;
-    while (!brpc::IsAskedToQuit()) {
-        // We will receive response synchronously, safe to put variables
-        // on stack.
-        RequestVoteRequest request;
-        RequestVoteResponse response;
-        brpc::Controller cntl;
+    hit_consistency::ClientRequest request;
+    request.set_value("1234567890");
+    stub.client_request(&cntl, &request, &response, NULL);
 
-        request.set_term(1);
 
-        cntl.set_log_id(log_id ++);  // set by user
-        // Set attachment which is wired to network directly instead of 
-        // being serialized into protobuf messages.
-        cntl.request_attachment().append(FLAGS_attachment);
-
-        // Because `done'(last parameter) is NULL, this function waits until
-        // the response comes back or error occurs(including timedout).
-        stub.prevote(&cntl, &request, &response, NULL);
-        if (!cntl.Failed()) {
-            LOG(INFO) << "Received response from " << cntl.remote_side()
-                << " to " << cntl.local_side()
-                << ": " << response.term() << " (attached="
-                << cntl.response_attachment() << ")"
-                << " latency=" << cntl.latency_us() << "us";
-        } else {
-            LOG(WARNING) << cntl.ErrorText();
-        }
-        usleep(FLAGS_interval_ms * 1000L);
+    if (cntl.Failed()) {
+        LOG(WARNING) << "Fail to send request to " << leader_addr
+                      << " : " << cntl.ErrorText();
     }
-
-    LOG(INFO) << "EchoClient is going to quit";
-  return 0;
+    if (!response.success()) {
+        LOG(WARNING) << "Fail to send request to " << leader_addr
+                      << ", redirecting to "
+                      << (response.has_redirect() 
+                            ? response.redirect() : "nowhere");
+    }
+    return 0;
 }

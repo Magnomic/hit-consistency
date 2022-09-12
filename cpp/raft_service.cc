@@ -35,7 +35,6 @@ void RaftSericeImpl::append_entries(google::protobuf::RpcController* cntl_base, 
     brpc::ClosureGuard done_guard(done);
     brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
     NodeImpl& node = NodeImpl::getInstance();
-    node.handle_append_entries_request(cntl, request, response, done, false);
-    LOG(INFO) << "Get AppendEntries from " << request->server_id();
+    node.handle_append_entries_request(cntl, request, response, done_guard.release(), false);
     return; 
 }

@@ -270,6 +270,9 @@ void Replicator::_on_heartbeat_returned(
         AppendEntriesRequest* request, 
         AppendEntriesResponse* response,
         int64_t rpc_send_time) {
+    
+    LOG(INFO) << "Got Response heartbeat";
+
     std::unique_ptr<brpc::Controller> cntl_guard(cntl);
     std::unique_ptr<AppendEntriesRequest>  req_guard(request);
     std::unique_ptr<AppendEntriesResponse> res_guard(response);

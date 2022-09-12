@@ -11,7 +11,8 @@ service RaftService {
     rpc prevote (RequestVoteRequest) returns (RequestVoteResponse) {}
     rpc request_vote (RequestVoteRequest) returns (RequestVoteResponse) {}
     rpc append_entries (AppendEntriesRequest) returns (AppendEntriesResponse) {}
-    rpc timeout_now(TimeoutNowRequest) returns (TimeoutNowResponse);
+    rpc timeout_now(TimeoutNowRequest) returns (TimeoutNowResponse) {}
+    rpc client_request(ClientRequest) returns (ClientResponse) {}
 }
   
 
@@ -68,3 +69,12 @@ message AppendEntriesResponse {
     optional int64 last_log_index = 3;
     optional bool readonly = 4;
 };
+
+message ClientRequest{
+    required string payload = 1;
+}
+
+message ClientResponse{
+    required bool success = 1;
+    optional string redirect = 2;
+}

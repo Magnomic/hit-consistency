@@ -150,6 +150,8 @@ int NodeImpl::init(NodeOptions node_options, const GroupId& group_id, const Peer
     _server_id = peer_id;
     node_options.initial_conf.list_peers(&_peer_list);
 
+    _config_manager = new ConfigurationManager();
+    
     // log storage and log manager init
     if (init_log_storage() != 0) {
         LOG(ERROR) << "node " << _group_id << ":" << _server_id

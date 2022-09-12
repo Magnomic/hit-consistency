@@ -47,7 +47,9 @@ int LogManager::init(const LogManagerOptions &options) {
         return ENOMEM;
     }
     _log_storage = options.log_storage;
+    LOG(INFO) << _log_storage;
     _config_manager = options.configuration_manager;
+    LOG(INFO) << _config_manager;
     int ret = _log_storage->init(_config_manager);
     if (ret != 0) {
         return ret;

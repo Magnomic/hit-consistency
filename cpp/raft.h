@@ -136,6 +136,7 @@ inline NodeOptions::NodeOptions()
     , usercode_in_pthread(false)
     , filter_before_copy_remote(false)
     , disable_cli(false)
+    , log_storage(NULL)
 {}
 
 inline const char* errortype2str(ErrorType t) {
