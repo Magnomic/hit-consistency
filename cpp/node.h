@@ -158,6 +158,10 @@ friend class FollowerStableClosure;
         
         std::vector<Closure*> _shutdown_continuations;
 
+        bthread::ExecutionQueueId<LogEntryAndClosure> _apply_queue_id;
+
+        bthread::ExecutionQueue<LogEntryAndClosure>::scoped_ptr_t _apply_queue;
+
         NodeImpl();
         
         ~NodeImpl();
@@ -178,6 +182,8 @@ friend class FollowerStableClosure;
         int init(NodeOptions node_options, const GroupId& group_id, const PeerId& peer_id);
 
         int start();
+
+        void apply_task(const Task& task);
 
         void prevote(std::unique_lock<raft::raft_mutex_t>* lck);
 
@@ -222,5 +228,9 @@ friend class FollowerStableClosure;
         int init_meta_storage();
 
         void check_step_down(const int64_t request_term, const PeerId& server_id);
+
+        static int execute_applying_tasks(void* meta, bthread::TaskIterator<LogEntryAndClosure>& iter);
+
+        void apply(LogEntryAndClosure tasks[], size_t size);
 };
 #endif 

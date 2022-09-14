@@ -61,6 +61,9 @@ public:
     void get_status(BallotBoxStatus* ballot_box_status);
 
     int clear_pending_tasks();
+
+    int append_pending_task(const Configuration& conf, const Configuration* old_conf,
+                                   Closure* closure);
 private:
                    
     raft::raft_mutex_t                              _mutex;

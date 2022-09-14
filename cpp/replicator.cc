@@ -271,7 +271,7 @@ void Replicator::_on_heartbeat_returned(
         AppendEntriesResponse* response,
         int64_t rpc_send_time) {
     
-    LOG(INFO) << "Got Response heartbeat";
+    LOG(INFO) << "Got Response heartbeat" << request;
 
     std::unique_ptr<brpc::Controller> cntl_guard(cntl);
     std::unique_ptr<AppendEntriesRequest>  req_guard(request);
@@ -291,7 +291,7 @@ void Replicator::_on_heartbeat_returned(
                
     if (cntl->Failed()) {
         ss << " fail, sleep.";
-        BRAFT_VLOG << ss.str();
+        LOG(INFO) << ss.str();
 
         // TODO: Should it be VLOG?
         LOG_IF(WARNING, (r->_consecutive_error_times++) % 10 == 0)

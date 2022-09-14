@@ -39,21 +39,19 @@ int main(int argc, char** argv) {
     std::string leader_addr("0.0.0.0:8000");
 
     brpc::Channel channel;
-    if (channel.Init(leader_addr, NULL) != 0) {
+    if (channel.Init(leader_addr.c_str(), NULL) != 0) {
         LOG(ERROR) << "Fail to init channel to " << leader_addr;
             bthread_usleep(1 * 1000L);
     }
 
     hit_consistency::RaftService_Stub stub(&channel);
     brpc::Controller cntl;
-    cntl.set_timeout_ms(5000);
-    // Randomly select which request we want send;
+    cntl.set_timeout_ms(500);
     hit_consistency::ClientResponse response;
-
     hit_consistency::ClientRequest request;
-    request.set_value("1234567890");
-    stub.client_request(&cntl, &request, &response, NULL);
+    request.set_payload("1234567890");
 
+    stub.client_request(&cntl, &request, &response, NULL);
 
     if (cntl.Failed()) {
         LOG(WARNING) << "Fail to send request to " << leader_addr

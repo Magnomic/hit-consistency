@@ -158,3 +158,18 @@ void BallotBox::get_status(BallotBoxStatus* status) {
         status->pending_queue_size = _pending_meta_queue.size();
     }
 }
+
+int BallotBox::append_pending_task(const Configuration& conf, const Configuration* old_conf,
+                                   Closure* closure) {
+    Ballot bl;
+    if (bl.init(conf, old_conf) != 0) {
+        CHECK(false) << "Fail to init ballot";
+        return -1;
+    }
+
+    BAIDU_SCOPED_LOCK(_mutex);
+    CHECK(_pending_index > 0);
+    _pending_meta_queue.push_back(Ballot());
+    _pending_meta_queue.back().swap(bl);
+    return 0;
+}

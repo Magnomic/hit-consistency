@@ -2,6 +2,7 @@
 
 DEFINE_bool(raft_step_down_when_vote_timedout, true, 
             "candidate steps down when reaching timeout");
+DEFINE_int32(raft_apply_batch, 64, "batch number of applying tasks");
 BRPC_VALIDATE_GFLAG(raft_step_down_when_vote_timedout, brpc::PassValidate);
 
 struct GlobalExtension {
@@ -20,6 +21,42 @@ static void global_init_or_die_impl() {
     log_storage_extension()->RegisterOrDie("local", &s_ext.local_log);
     meta_storage_extension()->RegisterOrDie("local", &s_ext.local_meta);
 }
+
+class LeaderStableClosure : public LogManager::StableClosure {
+public:
+    void Run();
+private:
+    LeaderStableClosure(const NodeId& node_id,
+                        size_t nentries,
+                        BallotBox* ballot_box);
+    ~LeaderStableClosure() {}
+friend class NodeImpl;
+    NodeId _node_id;
+    size_t _nentries;
+    BallotBox* _ballot_box;
+};
+
+LeaderStableClosure::LeaderStableClosure(const NodeId& node_id,
+                                         size_t nentries,
+                                         BallotBox* ballot_box)
+    : _node_id(node_id), _nentries(nentries), _ballot_box(ballot_box)
+{
+}
+
+void LeaderStableClosure::Run() {
+    if (status().ok()) {
+        if (_ballot_box) {
+            // ballot_box check quorum ok, will call fsm_caller
+            _ballot_box->commit_at(
+                    _first_log_index, _first_log_index + _nentries - 1, _node_id.peer_id);
+        }
+    } else {
+        LOG(ERROR) << "node " << _node_id << " append [" << _first_log_index << ", "
+                   << _first_log_index + _nentries - 1 << "] failed";
+    }
+    delete this;
+}
+
 
 
 static void print_revision(std::ostream& os, void*) {
@@ -163,6 +200,21 @@ int NodeImpl::init(NodeOptions node_options, const GroupId& group_id, const Peer
     if (init_meta_storage() != 0) {
         LOG(ERROR) << "node " << _group_id << ":" << _server_id
                    << " init_meta_storage failed";
+        return -1;
+    }
+
+    if (bthread::execution_queue_start(&_apply_queue_id, NULL,
+                                       execute_applying_tasks, this) != 0) {
+        LOG(ERROR) << "node " << _group_id << ":" << _server_id 
+                   << " fail to start execution_queue";
+        return -1;
+    }
+
+    _apply_queue = execution_queue_address(_apply_queue_id);
+
+    if (!_apply_queue) {
+        LOG(ERROR) << "node " << _group_id << ":" << _server_id
+                   << " fail to address execution_queue";
         return -1;
     }
 
@@ -391,6 +443,17 @@ int NodeImpl::handle_request_vote(const RequestVoteRequest* request, RequestVote
     response->set_term(_current_term);
     response->set_granted(request->term() == _current_term && _voted_id == candidate_id);
     return 0;
+}
+
+void NodeImpl::apply_task(const Task& task){
+    LogEntry* entry = new LogEntry;
+    entry->AddRef();
+    entry->data.swap(*task.data);
+    LogEntryAndClosure m;
+    m.entry = entry;
+    if (_apply_queue->execute(m, &bthread::TASK_OPTIONS_INPLACE, NULL) != 0){
+        entry->Release();
+    }
 }
 
 
@@ -631,9 +694,9 @@ void NodeImpl::become_leader(){
             continue;
         }
 
-        BRAFT_VLOG << "node " << _group_id << ":" << _server_id
-                   << " term " << _current_term
-                   << " add replicator " << *iter;
+        LOG(INFO) << "node " << _group_id << ":" << _server_id
+                  << " term " << _current_term
+                  << " add replicator " << *iter;
         //TODO: check return code
         _replicator_group.add_replicator(*iter);
     }
@@ -807,6 +870,86 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
     _log_manager->check_and_set_configuration(&_conf);
 
 }
+
+ int NodeImpl::execute_applying_tasks(void* meta, bthread::TaskIterator<LogEntryAndClosure>& iter){
+    LOG(INFO) << "Got Task";
+
+    if (iter.is_queue_stopped()) {
+        return 0;
+    }
+    // TODO: the batch size should limited by both task size and the total log
+    // size
+    const size_t batch_size = FLAGS_raft_apply_batch;
+    DEFINE_SMALL_ARRAY(LogEntryAndClosure, tasks, batch_size, 256);
+    size_t cur_size = 0;
+    NodeImpl* m = (NodeImpl*)meta;
+    for (; iter; ++iter) {
+        if (cur_size == batch_size) {
+            m->apply(tasks, cur_size);
+            cur_size = 0;
+        }
+        tasks[cur_size++] = *iter;
+    }
+    if (cur_size > 0) {
+        m->apply(tasks, cur_size);
+    }
+    return 0;
+ }
+
+void NodeImpl::apply(LogEntryAndClosure tasks[], size_t size) {
+
+    std::vector<LogEntry*> entries;
+    entries.reserve(size);
+    std::unique_lock<raft::raft_mutex_t> lck(_mutex);
+
+    if (_state != STATE_LEADER) {
+        butil::Status st;
+        if (_state != STATE_TRANSFERRING) {
+            st.set_error(EPERM, "is not leader");
+        } else {
+            st.set_error(EBUSY, "is transferring leadership");
+        }
+        lck.unlock();
+        BRAFT_VLOG << "node " << _group_id << ":" << _server_id << " can't apply : " << st;
+        for (size_t i = 0; i < size; ++i) {
+            tasks[i].entry->Release();
+            if (tasks[i].done) {
+                tasks[i].done->status() = st;
+                run_closure_in_bthread(tasks[i].done);
+            }
+        }
+        return;
+    }
+    for (size_t i = 0; i < size; ++i) {
+        if (tasks[i].expected_term != -1 && tasks[i].expected_term != _current_term) {
+            BRAFT_VLOG << "node " << _group_id << ":" << _server_id
+                      << " can't apply taks whose expected_term=" << tasks[i].expected_term
+                      << " doesn't match current_term=" << _current_term;
+            if (tasks[i].done) {
+                tasks[i].done->status().set_error(
+                        EPERM, "expected_term=%" PRId64 " doesn't match current_term=%" PRId64,
+                        tasks[i].expected_term, _current_term);
+                run_closure_in_bthread(tasks[i].done);
+            }
+            tasks[i].entry->Release();
+            continue;
+        }
+        entries.push_back(tasks[i].entry);
+        entries.back()->id.term = _current_term;
+        entries.back()->type = ENTRY_TYPE_DATA;
+        _ballot_box->append_pending_task(_conf.conf,
+                                         _conf.stable() ? NULL : &_conf.old_conf,
+                                         NULL);
+    }
+    _log_manager->append_entries(&entries,
+                               new LeaderStableClosure(
+                                        NodeId(_group_id, _server_id),
+                                        entries.size(),
+                                        _ballot_box));
+    // update _conf.first
+    _log_manager->check_and_set_configuration(&_conf);
+}
+
 
 // in lock
 void NodeImpl::check_step_down(const int64_t request_term, const PeerId& server_id) {

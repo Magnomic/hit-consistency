@@ -30,6 +30,13 @@ private:
     butil::Status _st;
 };
 
+
+struct LogEntryAndClosure {
+    LogEntry* entry;
+    Closure* done;
+    int64_t expected_term;
+};
+
 // Describe a specific error
 class Error {
 public:
