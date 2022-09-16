@@ -53,6 +53,7 @@ void RaftSericeImpl::client_request(google::protobuf::RpcController* cntl_base, 
     // Apply this log as a braft::Task
     Task task;
     task.data = &log;
+    task.expected_term = -1;
     // Now the task is applied to the group, waiting for the result.
     NodeImpl& node = NodeImpl::getInstance();
     node.apply_task(task);

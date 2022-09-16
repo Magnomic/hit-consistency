@@ -451,6 +451,7 @@ void NodeImpl::apply_task(const Task& task){
     entry->data.swap(*task.data);
     LogEntryAndClosure m;
     m.entry = entry;
+    m.expected_term = task.expected_term;
     if (_apply_queue->execute(m, &bthread::TASK_OPTIONS_INPLACE, NULL) != 0){
         entry->Release();
     }
@@ -922,7 +923,7 @@ void NodeImpl::apply(LogEntryAndClosure tasks[], size_t size) {
     }
     for (size_t i = 0; i < size; ++i) {
         if (tasks[i].expected_term != -1 && tasks[i].expected_term != _current_term) {
-            BRAFT_VLOG << "node " << _group_id << ":" << _server_id
+            LOG(INFO) << "node " << _group_id << ":" << _server_id
                       << " can't apply taks whose expected_term=" << tasks[i].expected_term
                       << " doesn't match current_term=" << _current_term;
             if (tasks[i].done) {
