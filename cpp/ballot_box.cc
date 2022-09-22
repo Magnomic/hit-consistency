@@ -24,7 +24,9 @@
 
 
 BallotBox::BallotBox()
-    : _last_committed_index(0)
+    : _waiter(NULL)
+    , _closure_queue(NULL)
+    , _last_committed_index(0)
     , _pending_index(0)
 {
 }
@@ -33,7 +35,12 @@ BallotBox::~BallotBox() {
 }
 
 int BallotBox::init(const BallotBoxOptions &options) {
-
+    if (options.waiter == NULL || options.closure_queue == NULL) {
+        LOG(ERROR) << "waiter is NULL";
+        return EINVAL;
+    }
+    _waiter = options.waiter;
+    _closure_queue = options.closure_queue;
     return 0;
 }
 
@@ -82,6 +89,8 @@ int BallotBox::commit_at(
     _pending_index = last_committed_index + 1;
     _last_committed_index.store(last_committed_index, butil::memory_order_relaxed);
     lck.unlock();
+    // The order doesn't matter
+    _waiter->on_committed(last_committed_index);
     return 0;
 }
 
@@ -92,6 +101,7 @@ int BallotBox::clear_pending_tasks() {
         saved_meta.swap(_pending_meta_queue);
         _pending_index = 0;
     }
+    _closure_queue->clear();
     return 0;
 }
 
@@ -106,6 +116,7 @@ int BallotBox::reset_pending_index(int64_t new_pending_index) {
     CHECK_GT(new_pending_index, _last_committed_index.load(
                                     butil::memory_order_relaxed));
     _pending_index = new_pending_index;
+    _closure_queue->reset_first_index(new_pending_index);
     return 0;
 }
 
@@ -171,5 +182,6 @@ int BallotBox::append_pending_task(const Configuration& conf, const Configuratio
     CHECK(_pending_index > 0);
     _pending_meta_queue.push_back(Ballot());
     _pending_meta_queue.back().swap(bl);
+    _closure_queue->append_pending_closure(closure);
     return 0;
 }

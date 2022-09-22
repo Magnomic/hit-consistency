@@ -18,6 +18,7 @@
 #include <brpc/callback.h>
 
 #include "raft_message.pb.h"
+#include "state_machine.pb.h"
 #include "errno.pb.h"
 
 #include "raft_service.h"
@@ -36,6 +37,7 @@ using hit_consistency::RaftService_Stub;
 using hit_consistency::RequestVoteRequest;
 using hit_consistency::RequestVoteResponse;
 using hit_consistency::EntryType;
+using hit_consistency::StateMachineService;
 using hit_consistency::EHIGHERTERMRESPONSE;
 using hit_consistency::EVOTEFORCANDIDATE;
 using hit_consistency::EHIGHERTERMREQUEST;
@@ -149,6 +151,8 @@ friend class FollowerStableClosure;
         LogStorage* _log_storage;
 
         RaftMetaStorage* _meta_storage;
+        
+        FSMCaller* _fsm_caller;
 
         ConfigurationManager* _config_manager;
   
@@ -227,10 +231,15 @@ friend class FollowerStableClosure;
 
         int init_meta_storage();
 
+        int init_fsm_caller(const LogId& bootstrap_id);
+
         void check_step_down(const int64_t request_term, const PeerId& server_id);
 
         static int execute_applying_tasks(void* meta, bthread::TaskIterator<LogEntryAndClosure>& iter);
 
         void apply(LogEntryAndClosure tasks[], size_t size);
+
+        void shutdown(Closure* done);
+        void join();
 };
 #endif 

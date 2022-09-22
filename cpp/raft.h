@@ -21,6 +21,8 @@ using hit_consistency::ErrorType;
 
 template <typename T> class scoped_refptr;
 
+class StateMachine;
+
 class Closure : public google::protobuf::Closure {
 public:
     butil::Status& status() { return _st; }
@@ -88,6 +90,10 @@ struct NodeOptions {
     Configuration initial_conf;
 
     
+    // The specific StateMachine implemented your business logic, which must be
+    // a valid instance.
+    StateMachine* fsm;
+
     // The specific LogStorage implemented at the bussiness layer, which should be a valid
     // instance, otherwise use SegmentLogStorage by default.
     //
@@ -138,6 +144,7 @@ inline NodeOptions::NodeOptions()
     : election_timeout_ms(1000)
     , snapshot_interval_s(3600)
     , catchup_margin(1000)
+    , fsm(NULL)
     , node_owns_fsm(false)
     , node_owns_log_storage(true)
     , usercode_in_pthread(false)

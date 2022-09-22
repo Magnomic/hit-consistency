@@ -188,7 +188,11 @@ int NodeImpl::init(NodeOptions node_options, const GroupId& group_id, const Peer
     node_options.initial_conf.list_peers(&_peer_list);
 
     _config_manager = new ConfigurationManager();
+
     
+    // Create _fsm_caller first as log_manager needs it to report error
+    _fsm_caller = new FSMCaller();
+
     // log storage and log manager init
     if (init_log_storage() != 0) {
         LOG(ERROR) << "node " << _group_id << ":" << _server_id
@@ -200,6 +204,11 @@ int NodeImpl::init(NodeOptions node_options, const GroupId& group_id, const Peer
     if (init_meta_storage() != 0) {
         LOG(ERROR) << "node " << _group_id << ":" << _server_id
                    << " init_meta_storage failed";
+        return -1;
+    }
+
+    if (init_fsm_caller(LogId(0, 0)) != 0) {
+        LOG(ERROR) << "Fail to init fsm_caller";
         return -1;
     }
 
@@ -221,6 +230,8 @@ int NodeImpl::init(NodeOptions node_options, const GroupId& group_id, const Peer
     // commitment manager init
     _ballot_box = new BallotBox();
     BallotBoxOptions ballot_box_options;
+    ballot_box_options.waiter = _fsm_caller;
+    ballot_box_options.closure_queue = _closure_queue;
     if (_ballot_box->init(ballot_box_options) != 0) {
         LOG(ERROR) << "node " << _group_id << ":" << _server_id
                    << " init _ballot_box failed";
@@ -244,30 +255,31 @@ int NodeImpl::init(NodeOptions node_options, const GroupId& group_id, const Peer
 
 int NodeImpl::start(){
 
-    brpc::Server server;
+    // brpc::Server server;
 
-    RaftSericeImpl raft_service_impl;
+    // RaftSericeImpl raft_service_impl;
     
-    if (server.AddService(&raft_service_impl, 
-                            brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
-            LOG(ERROR) << "Fail to add service";
-            return -1;
-        }
+    // if (server.AddService(&raft_service_impl, 
+    //                         brpc::SERVER_DOESNT_OWN_SERVICE) != 0) {
+    //         LOG(ERROR) << "Fail to add service";
+    //         return -1;
+    //     }
+        
     CHECK_EQ(0, _election_timer.init(this, 1000));
     CHECK_EQ(0, _vote_timer.init(this, 1000));
 
     // Start the server.
-    brpc::ServerOptions options;
-    options.idle_timeout_sec = _server_timeout;
-    if (server.Start(_server_id.addr, &options) != 0) {
-        LOG(ERROR) << "Fail to start EchoServer";
-        return -1;
-    }
+    // brpc::ServerOptions options;
+    // options.idle_timeout_sec = _server_timeout;
+    // if (server.Start(_server_id.addr, &options) != 0) {
+    //     LOG(ERROR) << "Fail to start EchoServer";
+    //     return -1;
+    // }
 
     _election_timer.start();
 
     // Wait until Ctrl-C is pressed, then Stop() and Join() the server.
-    server.RunUntilAskedToQuit();
+    // server.RunUntilAskedToQuit();
 
     return 0;
 }
@@ -451,9 +463,12 @@ void NodeImpl::apply_task(const Task& task){
     entry->data.swap(*task.data);
     LogEntryAndClosure m;
     m.entry = entry;
+    m.done = task.done;
     m.expected_term = task.expected_term;
     if (_apply_queue->execute(m, &bthread::TASK_OPTIONS_INPLACE, NULL) != 0){
+        task.done->status().set_error(EPERM, "Node is down");
         entry->Release();
+        return run_closure_in_bthread(task.done);
     }
 }
 
@@ -940,7 +955,7 @@ void NodeImpl::apply(LogEntryAndClosure tasks[], size_t size) {
         entries.back()->type = ENTRY_TYPE_DATA;
         _ballot_box->append_pending_task(_conf.conf,
                                          _conf.stable() ? NULL : &_conf.old_conf,
-                                         NULL);
+                                         tasks[i].done);
     }
     _log_manager->append_entries(&entries,
                                new LeaderStableClosure(
@@ -1093,6 +1108,7 @@ int NodeImpl::increase_term_to(int64_t new_term, const butil::Status& status) {
 }
 
 int NodeImpl::init_log_storage() {
+    CHECK(_fsm_caller);
     if (_options.log_storage) {
         _log_storage = _options.log_storage;
     } else {
@@ -1107,6 +1123,7 @@ int NodeImpl::init_log_storage() {
     LogManagerOptions log_manager_options;
     log_manager_options.log_storage = _log_storage;
     log_manager_options.configuration_manager = _config_manager;
+    log_manager_options.fsm_caller = _fsm_caller;
     return _log_manager->init(log_manager_options);
 }
 
@@ -1140,6 +1157,28 @@ int NodeImpl::init_meta_storage() {
         }
     } while (0);
 
+    return ret;
+}
+
+int NodeImpl::init_fsm_caller(const LogId& bootstrap_id) {
+    CHECK(_fsm_caller);
+    _closure_queue = new ClosureQueue(_options.usercode_in_pthread);
+    // fsm caller init, node AddRef in init
+    FSMCallerOptions fsm_caller_options;
+    fsm_caller_options.usercode_in_pthread = _options.usercode_in_pthread;
+    this->AddRef();
+    // fsm_caller_options.after_shutdown =
+    //     brpc::NewCallback<NodeImpl*>(after_shutdown, this);
+    fsm_caller_options.log_manager = _log_manager;
+    fsm_caller_options.fsm = _options.fsm;
+    fsm_caller_options.closure_queue = _closure_queue;
+    fsm_caller_options.node = this;
+    fsm_caller_options.bootstrap_id = bootstrap_id;
+    const int ret = _fsm_caller->init(fsm_caller_options);
+    if (ret != 0) {
+        delete fsm_caller_options.after_shutdown;
+        this->Release();
+    }
     return ret;
 }
 
@@ -1182,6 +1221,68 @@ void NodeImpl::reset_leader_id(const PeerId& new_leader_id,
     }
 }
 
+void NodeImpl::shutdown(Closure* done) {
+    // Note: shutdown is probably invoked more than once, make sure this method
+    // is idempotent
+    {
+        BAIDU_SCOPED_LOCK(_mutex);
+
+        LOG(INFO) << "node " << _group_id << ":" << _server_id << " shutdown,"
+            " current_term " << _current_term << " state " << state2str(_state);
+
+        if (_state < STATE_SHUTTING) {
+            // if it is leader, set the wakeup_a_candidate with true,
+            // if it is follower, call on_stop_following in step_down
+            if (_state <= STATE_FOLLOWER) {
+                butil::Status status;
+                status.set_error(ESHUTDOWN, "Raft node is going to quit.");
+                step_down(_current_term, _state == STATE_LEADER, status);
+            }
+
+            // change state to shutdown
+            _state = STATE_SHUTTING;
+
+            // Destroy all the timer
+            _election_timer.destroy();
+            _vote_timer.destroy();
+            _stepdown_timer.destroy();
+
+            // stop replicator and fsm_caller wait
+            if (_log_manager) {
+                _log_manager->shutdown();
+            }
+
+            // step_down will call _commitment_manager->clear_pending_applications(),
+            // this can avoid send LogEntry with closure to fsm_caller.
+            // fsm_caller shutdown will not leak user's closure.
+            if (_fsm_caller) {
+                _fsm_caller->shutdown();
+            }
+        }
+
+        if (_state != STATE_SHUTDOWN) {
+            // This node is shutting, push done into the _shutdown_continuations
+            // and after_shutdown would invoked this callbacks.
+            if (done) {
+                _shutdown_continuations.push_back(done);
+            }
+            return;
+        }
+    }  // out of _mutex;
+
+    // This node is down, it's ok to invoke done right now. Don't inovke this
+    // inplace to avoid the dead lock issue when done->Run() is going to acquire
+    // a mutex which is already held by the caller
+    if (done) {
+        run_closure_in_bthread(done);
+    }
+}
+
+void NodeImpl::join() {
+    if (_fsm_caller) {
+        _fsm_caller->join();
+    }
+}
 
 // Timers
 int NodeTimer::init(NodeImpl* node, int timeout_ms) {

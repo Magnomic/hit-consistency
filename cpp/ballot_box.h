@@ -66,6 +66,8 @@ public:
                                    Closure* closure);
 private:
                    
+    FSMCaller*                                      _waiter;
+    ClosureQueue*                                   _closure_queue;            
     raft::raft_mutex_t                              _mutex;
     butil::atomic<int64_t>                          _last_committed_index;
     int64_t                                         _pending_index;
