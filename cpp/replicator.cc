@@ -29,11 +29,11 @@
 #include "node.h"
 
 
-DEFINE_int32(raft_max_entries_size, 1024,
+DEFINE_int32(raft_max_entries_size, 64,
              "The max number of entries in AppendEntriesRequest");
 BRPC_VALIDATE_GFLAG(raft_max_entries_size, ::brpc::PositiveInteger);
 
-DEFINE_int32(raft_max_parallel_append_entries_rpc_num, 1,
+DEFINE_int32(raft_max_parallel_append_entries_rpc_num, 64,
              "The max number of parallel AppendEntries requests");
 BRPC_VALIDATE_GFLAG(raft_max_parallel_append_entries_rpc_num,
                     ::brpc::PositiveInteger);

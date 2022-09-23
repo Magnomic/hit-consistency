@@ -782,6 +782,9 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         // Requests from cache already updated timestamp
         _last_leader_timestamp = butil::monotonic_time_ms();
     }
+    if (request->entries_size() > 0){
+        LOG(INFO) << "received index = " << request->prev_log_index() + 1<< " to " << request->prev_log_index() + request->entries_size();
+    }
 
     const int64_t prev_log_index = request->prev_log_index();
     const int64_t prev_log_term = request->prev_log_term();
@@ -791,22 +794,22 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         int64_t saved_term = request->term();
         int     saved_entries_size = request->entries_size();
         std::string rpc_server_id = request->server_id();
-        if (!from_append_entries_cache /*&& handle_out_of_order_append_entries(cntl, request, response, done, last_index) */) {
-            // It's not safe to touch cntl/request/response/done after this point,
-            // since the ownership is tranfered to the cache.
-            lck.unlock();
-            done_guard.release();
-            LOG(WARNING) << "node " << _group_id << ":" << _server_id
-                         << " cache out-of-order AppendEntries from " 
-                         << rpc_server_id
-                         << " in term " << saved_term
-                         << " prev_log_index " << prev_log_index
-                         << " prev_log_term " << prev_log_term
-                         << " local_prev_log_term " << local_prev_log_term
-                         << " last_log_index " << last_index
-                         << " entries_size " << saved_entries_size;
-            return;
-        }
+        // if (!from_append_entries_cache /*&& handle_out_of_order_append_entries(cntl, request, response, done, last_index) */) {
+        //     // It's not safe to touch cntl/request/response/done after this point,
+        //     // since the ownership is tranfered to the cache.
+        //     lck.unlock();
+        //     done_guard.release();
+        //     LOG(WARNING) << "node " << _group_id << ":" << _server_id
+        //                  << " cache out-of-order AppendEntries from " 
+        //                  << rpc_server_id
+        //                  << " in term " << saved_term
+        //                  << " prev_log_index " << prev_log_index
+        //                  << " prev_log_term " << prev_log_term
+        //                  << " local_prev_log_term " << local_prev_log_term
+        //                  << " last_log_index " << last_index
+        //                  << " entries_size " << saved_entries_size;
+        //     return;
+        // }
 
         response->set_success(false);
         response->set_term(_current_term);
@@ -888,7 +891,6 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
 }
 
  int NodeImpl::execute_applying_tasks(void* meta, bthread::TaskIterator<LogEntryAndClosure>& iter){
-    LOG(INFO) << "Got Task";
 
     if (iter.is_queue_stopped()) {
         return 0;

@@ -213,9 +213,8 @@ public:
             }
 
             const ssize_t nw = file_pwrite(data, _fd->fd(), offset);
+            // const ssize_t nw =0;
             
-            LOG(INFO) << "Done write, nw = " << nw;
-
             if (nw < 0) {
                 PLOG(ERROR) << "Fail to write to fd=" << _fd->fd();
                 if (response) {
@@ -264,7 +263,6 @@ public:
         task.done = new StateMachineClosure(this, request, response,
                                      data, done_guard.release());
                                             
-        LOG(INFO) << "Got request from client";
         // Now the task is applied to the group, waiting for the result.
         return _node->apply_task(task);
     }
