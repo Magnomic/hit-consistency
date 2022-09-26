@@ -5,6 +5,10 @@ DEFINE_bool(raft_step_down_when_vote_timedout, true,
 DEFINE_int32(raft_apply_batch, 64, "batch number of applying tasks");
 BRPC_VALIDATE_GFLAG(raft_step_down_when_vote_timedout, brpc::PassValidate);
 
+DEFINE_int32(raft_max_append_entries_cache_size, 8,
+            "the max size of out-of-order append entries cache");
+BRPC_VALIDATE_GFLAG(raft_max_append_entries_cache_size, ::brpc::PositiveInteger);
+
 struct GlobalExtension {
     SegmentLogStorage local_log;
     LocalRaftMetaStorage local_meta;
@@ -782,9 +786,9 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         // Requests from cache already updated timestamp
         _last_leader_timestamp = butil::monotonic_time_ms();
     }
-    if (request->entries_size() > 0){
-        LOG(INFO) << "received index = " << request->prev_log_index() + 1<< " to " << request->prev_log_index() + request->entries_size();
-    }
+    // if (request->entries_size() > 0){
+    //     LOG(INFO) << "received index = " << request->prev_log_index() + 1<< " to " << request->prev_log_index() + request->entries_size();
+    // }
 
     const int64_t prev_log_index = request->prev_log_index();
     const int64_t prev_log_term = request->prev_log_term();
@@ -794,22 +798,22 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         int64_t saved_term = request->term();
         int     saved_entries_size = request->entries_size();
         std::string rpc_server_id = request->server_id();
-        // if (!from_append_entries_cache /*&& handle_out_of_order_append_entries(cntl, request, response, done, last_index) */) {
-        //     // It's not safe to touch cntl/request/response/done after this point,
-        //     // since the ownership is tranfered to the cache.
-        //     lck.unlock();
-        //     done_guard.release();
-        //     LOG(WARNING) << "node " << _group_id << ":" << _server_id
-        //                  << " cache out-of-order AppendEntries from " 
-        //                  << rpc_server_id
-        //                  << " in term " << saved_term
-        //                  << " prev_log_index " << prev_log_index
-        //                  << " prev_log_term " << prev_log_term
-        //                  << " local_prev_log_term " << local_prev_log_term
-        //                  << " last_log_index " << last_index
-        //                  << " entries_size " << saved_entries_size;
-        //     return;
-        // }
+        if (!from_append_entries_cache && handle_out_of_order_append_entries(cntl, request, response, done, last_index)) {
+            // It's not safe to touch cntl/request/response/done after this point,
+            // since the ownership is tranfered to the cache.
+            lck.unlock();
+            done_guard.release();
+            LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                         << " cache out-of-order AppendEntries from " 
+                         << rpc_server_id
+                         << " in term " << saved_term
+                         << " prev_log_index " << prev_log_index
+                         << " prev_log_term " << prev_log_term
+                         << " local_prev_log_term " << local_prev_log_term
+                         << " last_log_index " << last_index
+                         << " entries_size " << saved_entries_size;
+            return;
+        }
 
         response->set_success(false);
         response->set_term(_current_term);
@@ -888,6 +892,32 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
     // update configuration after _log_manager updated its memory status
     _log_manager->check_and_set_configuration(&_conf);
 
+}
+
+bool NodeImpl::handle_out_of_order_append_entries(brpc::Controller* cntl,
+                                                  const AppendEntriesRequest* request,
+                                                  AppendEntriesResponse* response,
+                                                  google::protobuf::Closure* done,
+                                                  int64_t local_last_index) {
+    if (local_last_index >= request->prev_log_index() ||
+        request->entries_size() == 0) {
+        return false;
+    }
+    if (!_append_entries_cache) {
+        _append_entries_cache = new AppendEntriesCache(this, ++_append_entries_cache_version);
+    }
+    AppendEntriesRpc* rpc = new AppendEntriesRpc;
+    rpc->cntl = cntl;
+    rpc->request = request;
+    rpc->response = response;
+    rpc->done = done;
+    rpc->receive_time_ms = butil::gettimeofday_ms();
+    bool rc = _append_entries_cache->store(rpc);
+    if (!rc && _append_entries_cache->empty()) {
+        delete _append_entries_cache;
+        _append_entries_cache = NULL;
+    }
+    return rc;
 }
 
  int NodeImpl::execute_applying_tasks(void* meta, bthread::TaskIterator<LogEntryAndClosure>& iter){
@@ -1286,6 +1316,33 @@ void NodeImpl::join() {
     }
 }
 
+
+void NodeImpl::on_append_entries_cache_timedout(void* arg) {
+    bthread_t tid;
+    if (bthread_start_background(
+                &tid, NULL, NodeImpl::handle_append_entries_cache_timedout,
+                arg) != 0) {
+        PLOG(ERROR) << "Fail to start bthread";
+        NodeImpl::handle_append_entries_cache_timedout(arg);
+    }
+}
+
+void* NodeImpl::handle_append_entries_from_cache(void* arg) {
+    HandleAppendEntriesFromCacheArg* handle_arg = (HandleAppendEntriesFromCacheArg*)arg;
+    NodeImpl* node = handle_arg->node;
+    butil::LinkedList<AppendEntriesRpc>& rpcs = handle_arg->rpcs;
+    while (!rpcs.empty()) {
+        AppendEntriesRpc* rpc = rpcs.head()->value();
+        rpc->RemoveFromList();
+        node->handle_append_entries_request(rpc->cntl, rpc->request,
+                                            rpc->response, rpc->done, true);
+        delete rpc;
+    }
+    node->Release();
+    delete handle_arg;
+    return NULL;
+}
+
 // Timers
 int NodeTimer::init(NodeImpl* node, int timeout_ms) {
     BRAFT_RETURN_IF(RepeatedTimerTask::init(timeout_ms) != 0, -1);
@@ -1324,4 +1381,227 @@ int VoteTimer::adjust_timeout_ms(int timeout_ms) {
 
 void StepdownTimer::run() {
     _node->handle_stepdown_timeout();
+}
+
+
+struct AppendEntriesCacheTimerArg {
+    NodeImpl* node;
+    int64_t timer_version;
+    int64_t cache_version;
+    int64_t timer_start_ms;
+};
+
+void* NodeImpl::handle_append_entries_cache_timedout(void* arg) {
+    AppendEntriesCacheTimerArg* timer_arg = (AppendEntriesCacheTimerArg*)arg;
+    NodeImpl* node = timer_arg->node;
+
+    std::unique_lock<raft::raft_mutex_t> lck(node->_mutex);
+    if (node->_append_entries_cache &&
+        timer_arg->cache_version == node->_append_entries_cache->cache_version()) {
+        node->_append_entries_cache->do_handle_append_entries_cache_timedout(
+                timer_arg->timer_version, timer_arg->timer_start_ms);
+        if (node->_append_entries_cache->empty()) {
+            delete node->_append_entries_cache;
+            node->_append_entries_cache = NULL;
+        }
+    }
+    lck.unlock();
+    delete timer_arg;
+    node->Release();
+    return NULL;
+}
+
+int64_t NodeImpl::AppendEntriesCache::first_index() const {
+    CHECK(!_rpc_map.empty());
+    CHECK(!_rpc_queue.empty());
+    return _rpc_map.begin()->second->request->prev_log_index() + 1;
+}
+
+int64_t NodeImpl::AppendEntriesCache::cache_version() const {
+    return _cache_version;
+}
+
+bool NodeImpl::AppendEntriesCache::empty() const {
+    return _rpc_map.empty();
+}
+
+bool NodeImpl::AppendEntriesCache::store(AppendEntriesRpc* rpc) {
+    if (!_rpc_map.empty()) {
+        bool need_clear = false;
+        std::map<int64_t, AppendEntriesRpc*>::iterator it =
+            _rpc_map.lower_bound(rpc->request->prev_log_index());
+        int64_t rpc_prev_index = rpc->request->prev_log_index();
+        int64_t rpc_last_index = rpc_prev_index + rpc->request->entries_size();
+
+        // Some rpcs with the overlap log index alredy exist, means retransmission
+        // happend, simplely clean all out of order requests, and store the new
+        // one.
+        if (it != _rpc_map.begin()) {
+            --it;
+            AppendEntriesRpc* prev_rpc = it->second;
+            if (prev_rpc->request->prev_log_index() +
+                prev_rpc->request->entries_size() > rpc_prev_index) {
+                need_clear = true;
+            }
+            ++it;
+        }
+        if (!need_clear && it != _rpc_map.end()) {
+            AppendEntriesRpc* next_rpc = it->second;
+            if (next_rpc->request->prev_log_index() < rpc_last_index) {
+                need_clear = true;
+            }
+        }
+        if (need_clear) {
+            clear();
+        }
+    }
+    _rpc_queue.Append(rpc);
+    _rpc_map.insert(std::make_pair(rpc->request->prev_log_index(), rpc));
+
+    // The first rpc need to start the timer
+    if (_rpc_map.size() == 1) {
+        if (!start_timer()) {
+            clear();
+            return true;
+        }
+    }
+    HandleAppendEntriesFromCacheArg* arg = NULL;
+    while (_rpc_map.size() > (size_t)FLAGS_raft_max_append_entries_cache_size) {
+        std::map<int64_t, AppendEntriesRpc*>::iterator it = _rpc_map.end();
+        --it;
+        AppendEntriesRpc* rpc_to_release = it->second;
+        rpc_to_release->RemoveFromList();
+        _rpc_map.erase(it);
+        if (arg == NULL) {
+            arg = new HandleAppendEntriesFromCacheArg;
+            arg->node = _node;
+        }
+        arg->rpcs.Append(rpc_to_release);
+    }
+    if (arg != NULL) {
+        start_to_handle(arg);
+    }
+    return true;
+}
+
+void NodeImpl::AppendEntriesCache::process_runable_rpcs(int64_t local_last_index) {
+    CHECK(!_rpc_map.empty());
+    CHECK(!_rpc_queue.empty());
+    HandleAppendEntriesFromCacheArg* arg = NULL;
+    for (std::map<int64_t, AppendEntriesRpc*>::iterator it = _rpc_map.begin();
+        it != _rpc_map.end();) {
+        AppendEntriesRpc* rpc = it->second;
+        if (rpc->request->prev_log_index() > local_last_index) {
+            break;
+        }
+        local_last_index = rpc->request->prev_log_index() + rpc->request->entries_size();
+        _rpc_map.erase(it++);
+        rpc->RemoveFromList();
+        if (arg == NULL) {
+            arg = new HandleAppendEntriesFromCacheArg;
+            arg->node = _node;
+        }
+        arg->rpcs.Append(rpc);
+    }
+    if (arg != NULL) {
+        start_to_handle(arg);
+    }
+    if (_rpc_map.empty()) {
+        stop_timer();
+    }
+}
+
+void NodeImpl::AppendEntriesCache::clear() {
+    BRAFT_VLOG << "node " << _node->_group_id << ":" << _node->_server_id
+               << " clear append entries cache";
+    stop_timer();
+    HandleAppendEntriesFromCacheArg* arg = new HandleAppendEntriesFromCacheArg;
+    arg->node = _node;
+    while (!_rpc_queue.empty()) {
+        AppendEntriesRpc* rpc = _rpc_queue.head()->value();
+        rpc->RemoveFromList();
+        arg->rpcs.Append(rpc);
+    }
+    _rpc_map.clear();
+    start_to_handle(arg);
+}
+
+void NodeImpl::AppendEntriesCache::ack_fail(AppendEntriesRpc* rpc) {
+    rpc->cntl->SetFailed(EINVAL, "Fail to handle out-of-order requests");
+    rpc->done->Run();
+    delete rpc;
+}
+
+void NodeImpl::AppendEntriesCache::start_to_handle(HandleAppendEntriesFromCacheArg* arg) {
+    _node->AddRef();
+    bthread_t tid;
+    // Sequence if not important
+    if (bthread_start_background(
+                &tid, NULL, NodeImpl::handle_append_entries_from_cache,
+                arg) != 0) {
+        PLOG(ERROR) << "Fail to start bthread";
+        // We cant't call NodeImpl::handle_append_entries_from_cache
+        // here since we are in the mutex, which will cause dead lock, just
+        // set the rpc fail, and let leader block for a while.
+        butil::LinkedList<AppendEntriesRpc>& rpcs = arg->rpcs;
+        while (!rpcs.empty()) {
+            AppendEntriesRpc* rpc = rpcs.head()->value();
+            rpc->RemoveFromList();
+            ack_fail(rpc);
+        }
+        _node->Release();
+        delete arg;
+    }
+}
+
+
+bool NodeImpl::AppendEntriesCache::start_timer() {
+    ++_timer_version;
+    AppendEntriesCacheTimerArg* timer_arg = new AppendEntriesCacheTimerArg;
+    timer_arg->node = _node;
+    timer_arg->timer_version = _timer_version;
+    timer_arg->cache_version = _cache_version;
+    timer_arg->timer_start_ms = _rpc_queue.head()->value()->receive_time_ms;
+    timespec duetime = butil::milliseconds_from(
+            butil::milliseconds_to_timespec(timer_arg->timer_start_ms),
+            std::max(_node->_options.election_timeout_ms >> 2, 1));
+    _node->AddRef();
+    if (bthread_timer_add(
+                &_timer, duetime, NodeImpl::on_append_entries_cache_timedout,
+                timer_arg) != 0) {
+        LOG(ERROR) << "Fail to add timer";
+        delete timer_arg;
+        _node->Release();
+        return false;
+    }
+    return true;
+}
+
+void NodeImpl::AppendEntriesCache::stop_timer() {
+    if (_timer == bthread_timer_t()) {
+        return;
+    }
+    ++_timer_version;
+    if (bthread_timer_del(_timer) == 0) {
+        _node->Release();
+        _timer = bthread_timer_t();
+    }
+}
+
+void NodeImpl::AppendEntriesCache::do_handle_append_entries_cache_timedout(
+        int64_t timer_version, int64_t timer_start_ms) {
+    if (timer_version != _timer_version) {
+        return;
+    }
+    CHECK(!_rpc_map.empty());
+    CHECK(!_rpc_queue.empty());
+    // If the head of out-of-order requests is not be handled, clear the entire cache,
+    // otherwise, start a new timer.
+    if (_rpc_queue.head()->value()->receive_time_ms <= timer_start_ms) {
+        clear();
+        return;
+    }
+    if (!start_timer()) {
+        clear();
+    }
 }

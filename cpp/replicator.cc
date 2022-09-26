@@ -29,11 +29,11 @@
 #include "node.h"
 
 
-DEFINE_int32(raft_max_entries_size, 64,
+DEFINE_int32(raft_max_entries_size, 1024,
              "The max number of entries in AppendEntriesRequest");
 BRPC_VALIDATE_GFLAG(raft_max_entries_size, ::brpc::PositiveInteger);
 
-DEFINE_int32(raft_max_parallel_append_entries_rpc_num, 64,
+DEFINE_int32(raft_max_parallel_append_entries_rpc_num, 1024,
              "The max number of parallel AppendEntries requests");
 BRPC_VALIDATE_GFLAG(raft_max_parallel_append_entries_rpc_num,
                     ::brpc::PositiveInteger);
@@ -362,6 +362,8 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
        << r->_options.peer_id << " prev_log_index " << request->prev_log_index()
        << " prev_log_term " << request->prev_log_term() << " count " << request->entries_size();
 
+    // LOG(INFO) << ss.str();
+
     bool valid_rpc = false;
     int64_t rpc_first_index = request->prev_log_index() + 1;
     int64_t min_flying_index = r->_min_flying_index();
@@ -608,10 +610,10 @@ void Replicator::_send_entries() {
     if (_flying_append_entries_size >= FLAGS_raft_max_entries_size ||
         _append_entries_in_fly.size() >= (size_t)FLAGS_raft_max_parallel_append_entries_rpc_num ||
         _st.st == BLOCKING) {
-        BRAFT_VLOG << "node " << _options.group_id << ":" << _options.server_id
-            << " skip sending AppendEntriesRequest to " << _options.peer_id
-            << ", too many requests in flying, or the replicator is in block,"
-            << " next_index " << _next_index << " flying_size " << _flying_append_entries_size;
+        // LOG(INFO) << "node " << _options.group_id << ":" << _options.server_id
+        //     << " skip sending AppendEntriesRequest to " << _options.peer_id
+        //     << ", too many requests in flying, or the replicator is in block,"
+        //     << " next_index " << _next_index << " flying_size " << _flying_append_entries_size;
         CHECK_EQ(0, bthread_id_unlock(_id)) << "Fail to unlock " << _id;
         return;
     }
@@ -625,7 +627,7 @@ void Replicator::_send_entries() {
         return;
     }
     EntryMeta em;
-    const int max_entries_size = FLAGS_raft_max_entries_size - _flying_append_entries_size;
+    const int max_entries_size = 1; //FLAGS_raft_max_entries_size - _flying_append_entries_size;
     int prepare_entry_rc = 0;
     CHECK_GT(max_entries_size, 0);
     for (int i = 0; i < max_entries_size; ++i) {
@@ -651,12 +653,12 @@ void Replicator::_send_entries() {
     
     g_send_entries_batch_counter << request->entries_size();
 
-    BRAFT_VLOG << "node " << _options.group_id << ":" << _options.server_id
-        << " send AppendEntriesRequest to " << _options.peer_id << " term " << _options.term
-        << " last_committed_index " << request->committed_index()
-        << " prev_log_index " << request->prev_log_index()
-        << " prev_log_term " << request->prev_log_term()
-        << " next_index " << _next_index << " count " << request->entries_size();
+    // LOG(INFO) << "node " << _options.group_id << ":" << _options.server_id
+    //     << " send AppendEntriesRequest to " << _options.peer_id << " term " << _options.term
+    //     << " last_committed_index " << request->committed_index()
+    //     << " prev_log_index " << request->prev_log_index()
+    //     << " prev_log_term " << request->prev_log_term()
+    //     << " next_index " << _next_index << " count " << request->entries_size();
     _st.st = APPENDING_ENTRIES;
     _st.first_log_index = _min_flying_index();
     _st.last_log_index = _next_index - 1;

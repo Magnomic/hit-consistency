@@ -100,9 +100,53 @@ class StepdownTimer : public NodeTimer {
         void run();
 };
 
+
 class BAIDU_CACHELINE_ALIGNMENT NodeImpl : public butil::RefCountedThreadSafe<NodeImpl>{
 
 friend class FollowerStableClosure;
+
+    struct AppendEntriesRpc : public butil::LinkNode<AppendEntriesRpc> {
+        brpc::Controller* cntl;
+        const AppendEntriesRequest* request;
+        AppendEntriesResponse* response;
+        google::protobuf::Closure* done;
+        int64_t receive_time_ms;
+    };
+
+    struct HandleAppendEntriesFromCacheArg {
+        NodeImpl* node;
+        butil::LinkedList<AppendEntriesRpc> rpcs;
+    };
+
+    // A simple cache to temporaryly store out-of-order AppendEntries requests.
+    class AppendEntriesCache {
+    public:
+        AppendEntriesCache(NodeImpl* node, int64_t version)
+            : _node(node), _timer(bthread_timer_t())
+            , _cache_version(0), _timer_version(0) {}
+
+        int64_t first_index() const;
+        int64_t cache_version() const;
+        bool empty() const;
+        bool store(AppendEntriesRpc* rpc);
+        void process_runable_rpcs(int64_t local_last_index);
+        void clear();
+        void do_handle_append_entries_cache_timedout(
+                int64_t timer_version, int64_t timer_start_ms);
+
+    private:
+        void ack_fail(AppendEntriesRpc* rpc);
+        void start_to_handle(HandleAppendEntriesFromCacheArg* arg);
+        bool start_timer();
+        void stop_timer();
+
+        NodeImpl* _node;
+        butil::LinkedList<AppendEntriesRpc> _rpc_queue;
+        std::map<int64_t, AppendEntriesRpc*> _rpc_map;
+        bthread_timer_t _timer;
+        int64_t _cache_version;
+        int64_t _timer_version;
+    };
 
     private:
 
@@ -173,6 +217,10 @@ friend class FollowerStableClosure;
         NodeImpl(const NodeImpl&);
 
         NodeImpl& operator=(const NodeImpl&);
+        
+        AppendEntriesCache* _append_entries_cache;
+        
+        int64_t _append_entries_cache_version;
 
     public:        
 
@@ -237,9 +285,22 @@ friend class FollowerStableClosure;
 
         static int execute_applying_tasks(void* meta, bthread::TaskIterator<LogEntryAndClosure>& iter);
 
+        static void on_append_entries_cache_timedout(void* arg);
+
         void apply(LogEntryAndClosure tasks[], size_t size);
 
         void shutdown(Closure* done);
+
         void join();
+
+        static void* handle_append_entries_cache_timedout(void* arg);
+        
+        bool handle_out_of_order_append_entries(brpc::Controller* cntl,
+                                                        const AppendEntriesRequest* request,
+                                                        AppendEntriesResponse* response,
+                                                        google::protobuf::Closure* done,
+                                                        int64_t local_last_index);
+                                                        
+        static void* handle_append_entries_from_cache(void* arg);
 };
 #endif 
