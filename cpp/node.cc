@@ -740,6 +740,7 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
     // pre set term, to avoid get term in lock
     response->set_term(_current_term);
 
+    // validate the request
     PeerId server_id;
     if (0 != server_id.parse(request->server_id())) {
         lck.unlock();
@@ -786,13 +787,28 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         // Requests from cache already updated timestamp
         _last_leader_timestamp = butil::monotonic_time_ms();
     }
-    // if (request->entries_size() > 0){
-    //     LOG(INFO) << "received index = " << request->prev_log_index() + 1<< " to " << request->prev_log_index() + request->entries_size();
-    // }
+    
+    // trace the sequence of the entries and periodically output it
+    if (request->entries_size() > 0 && !from_append_entries_cache){
+        int64_t _t_index = request->prev_log_index();
+        for (int i = 0; i < request->entries_size(); i++) {
+            _t_index++;
+            _entries_index_sequence.push_back(_t_index);
+            if (_entries_index_sequence.size() > 100){
+                std::stringstream ss;
+                ss << "periodically output indexes ";
+                while (!_entries_index_sequence.empty()){
+                    ss << _entries_index_sequence.front() << ", ";
+                    _entries_index_sequence.pop_front();
+                }
+                LOG(INFO) << ss.str();
+            }
+        }
+    }
 
     const int64_t prev_log_index = request->prev_log_index();
     const int64_t prev_log_term = request->prev_log_term();
-    const int64_t local_prev_log_term = _log_manager->get_term(prev_log_index);
+    const int64_t local_prev_log_term = _log_manager->get_term(prev_log_index); // check the term continuity of the entries. but for ooEntries, prev_log_index cannot be obtained.
     if (local_prev_log_term != prev_log_term) {
         int64_t last_index = _log_manager->last_log_index();
         int64_t saved_term = request->term();

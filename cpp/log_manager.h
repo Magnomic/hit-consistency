@@ -66,11 +66,6 @@ public:
     // logs which can be safely truncated.
     BRAFT_MOCK void set_snapshot(const SnapshotMeta* meta);
 
-    // We don't delete all the logs before last snapshot to avoid installing
-    // snapshot on slow replica. Call this method to drop all the logs before
-    // last snapshot immediately.
-    BRAFT_MOCK void clear_bufferred_logs();
-
     // Get the log at |index|
     // Returns:
     //  success return ptr, fail return null

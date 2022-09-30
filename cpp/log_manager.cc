@@ -568,14 +568,6 @@ int LogManager::disk_thread(void* meta,
     return 0;
 }
 
-void LogManager::clear_bufferred_logs() {
-    std::unique_lock<raft::raft_mutex_t> lck(_mutex);
-    if (_last_snapshot_id.index != 0) {
-        _virtual_first_log_id = _last_snapshot_id;
-        truncate_prefix(_last_snapshot_id.index + 1, lck);
-    }
-}
-
 LogEntry* LogManager::get_entry_from_memory(const int64_t index) {
     LogEntry* entry = NULL;
     if (!_logs_in_memory.empty()) {
@@ -592,14 +584,6 @@ LogEntry* LogManager::get_entry_from_memory(const int64_t index) {
 int64_t LogManager::unsafe_get_term(const int64_t index) {
     if (index == 0) {
         return 0;
-    }
-    // check virtual first log
-    if (index == _virtual_first_log_id.index) {
-        return _virtual_first_log_id.term;
-    }
-    // check last_snapshot_id
-    if (index == _last_snapshot_id.index) {
-        return _last_snapshot_id.term;
     }
     // out of range, direct return NULL
     // check this after check last_snapshot_id, because it is likely that
@@ -621,14 +605,6 @@ int64_t LogManager::get_term(const int64_t index) {
         return 0;
     }
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
-    // check virtual first log
-    if (index == _virtual_first_log_id.index) {
-        return _virtual_first_log_id.term;
-    }
-    // check last_snapshot_id
-    if (index == _last_snapshot_id.index) {
-        return _last_snapshot_id.term;
-    }
     // out of range, direct return NULL
     // check this after check last_snapshot_id, because it is likely that
     // last_snapshot_id < first_log_index

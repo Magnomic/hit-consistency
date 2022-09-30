@@ -203,6 +203,8 @@ friend class FollowerStableClosure;
         ClosureQueue* _closure_queue;
 
         ReplicatorGroup _replicator_group;
+
+        std::deque<int64_t> _entries_index_sequence;
         
         std::vector<Closure*> _shutdown_continuations;
 
@@ -300,7 +302,7 @@ friend class FollowerStableClosure;
                                                         AppendEntriesResponse* response,
                                                         google::protobuf::Closure* done,
                                                         int64_t local_last_index);
-                                                        
+
         static void* handle_append_entries_from_cache(void* arg);
 };
 #endif 
