@@ -323,7 +323,7 @@ private:
 int main(int argc, char** argv) {
 
     
-    google::ParseCommandLineFlags(&argc, &argv, true);
+    gflags::ParseCommandLineFlags(&argc, &argv, true);
     
     butil::EndPoint addr(butil::IP_ANY, FLAGS_port);
 

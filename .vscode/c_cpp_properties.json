@@ -4,9 +4,8 @@
             "name": "Linux",
             "includePath": [
                 "${workspaceFolder}/**",
-                "/include/**",
                 "/usr/include/**",
-                "/root/incubator-brpc/output/include/**"
+                "../incubator-brpc/output/include/**"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",

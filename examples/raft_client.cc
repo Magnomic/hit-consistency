@@ -63,7 +63,7 @@ static void* sender(void* arg){
 
 int main(int argc, char** argv) {
 
-    google::ParseCommandLineFlags(&argc, &argv, true);
+    gflags::ParseCommandLineFlags(&argc, &argv, true);
 
     butil::AtExitManager exit_manager;
 
