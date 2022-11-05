@@ -606,9 +606,18 @@ LogEntry* LogManager::get_entry_from_memory(const int64_t index) {
     if (!_logs_in_memory.empty()) {
         int64_t first_index = _logs_in_memory.front()->id.index;
         int64_t last_index = _logs_in_memory.back()->id.index;
-        CHECK_EQ(last_index - first_index + 1, static_cast<int64_t>(_logs_in_memory.size()));
+        /* ooEntries don't follow this constrain */
+        // CHECK_EQ(last_index - first_index + 1, static_cast<int64_t>(_logs_in_memory.size()));
         if (index >= first_index && index <= last_index) {
-            entry = _logs_in_memory[index - first_index];
+            // entry = _logs_in_memory[index - first_index];
+            /* The position cannot be calculated because of ooEntries. We need to iterate the full deque. */
+            std::deque<LogEntry*>::iterator it = _logs_in_memory.begin();
+            for (; it != _logs_in_memory.end(); ++it){
+                if ((*it)->id.index == index){
+                    entry = *it;
+                    break;
+                }
+            }
         }
     }
     return entry;
