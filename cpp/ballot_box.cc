@@ -49,6 +49,7 @@ int BallotBox::commit_at(
     // FIXME(chenzhangyi01): The cricital section is unacceptable because it 
     // blocks all the other Replicators and LogManagers
 
+    /* TODO: _pending_queue will not contain committed ooEntries. */
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
     if (_pending_index == 0) {
         return EINVAL;

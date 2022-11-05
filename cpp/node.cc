@@ -157,6 +157,7 @@ private:
         _response->set_success(true);
         _response->set_term(_term);
 
+        /* TODO: We also need to return the ooCommitted indexes to leader. */
         const int64_t committed_index =
                 std::min(_request->committed_index(),
                          // ^^^ committed_index is likely less than the

@@ -365,19 +365,22 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
     // LOG(INFO) << ss.str();
 
     bool valid_rpc = false;
-    int64_t rpc_first_index = request->prev_log_index() + 1;
+    // int64_t rpc_first_index = request->prev_log_index() + 1;
+    int64_t rpc_first_index = response->last_log_index() + 1;
     int64_t min_flying_index = r->_min_flying_index();
     CHECK_GT(min_flying_index, 0);
 
     for (std::deque<FlyingAppendEntriesRpc>::iterator rpc_it = r->_append_entries_in_fly.begin();
         rpc_it != r->_append_entries_in_fly.end(); ++rpc_it) {
-        if (rpc_it->log_index > rpc_first_index) {
-            break;
-        }
+        /* We don't use rpc call to cancel the expired requests, because the rpc cannot be identified expired according to start index when ooEntries exists. */
+        // if (rpc_it->log_index > rpc_first_index) {
+        //     break;
+        // }
         if (rpc_it->call_id == cntl->call_id()) {
             valid_rpc = true;
         }
     }
+    /* All are vaild here */
     if (!valid_rpc) {
         ss << " ignore invalid rpc";
         BRAFT_VLOG << ss.str();
@@ -470,16 +473,23 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
     if (rpc_send_time > r->_last_rpc_send_timestamp) {
         r->_last_rpc_send_timestamp = rpc_send_time; 
     }
+    /* All of these entries are presisted. */
     const int entries_size = request->entries_size();
     const int64_t rpc_last_log_index = request->prev_log_index() + entries_size;
+    const int64_t rpc_first_log_index = request->prev_log_index() + 1;
     BRAFT_VLOG_IF(entries_size > 0) << "Group " << r->_options.group_id
                                     << " replicated logs in [" 
                                     << min_flying_index << ", " 
                                     << rpc_last_log_index
                                     << "] to peer " << r->_options.peer_id;
+    /* TODO: modify the ballot_box because response may commit ooEntries. */
     if (entries_size > 0) {
+        // r->_options.ballot_box->commit_at(
+        //         min_flying_index, rpc_last_log_index,
+        //         r->_options.peer_id);
+        /* Commit from first_index to last_index */
         r->_options.ballot_box->commit_at(
-                min_flying_index, rpc_last_log_index,
+                rpc_first_log_index, rpc_last_log_index,
                 r->_options.peer_id);
         g_send_entries_latency << cntl->latency_us();
         if (cntl->request_attachment().size() > 0) {

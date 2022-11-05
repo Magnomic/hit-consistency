@@ -207,6 +207,7 @@ private:
     
     brpc::Channel _sending_channel;
     int64_t _next_index;
+    std::deque<int64_t> _oo_committed_indexes;
     int64_t _flying_append_entries_size;
     int _consecutive_error_times;
     bool _has_succeeded;
