@@ -9,6 +9,14 @@ DEFINE_int32(raft_max_append_entries_cache_size, 8,
             "the max size of out-of-order append entries cache");
 BRPC_VALIDATE_GFLAG(raft_max_append_entries_cache_size, ::brpc::PositiveInteger);
 
+DEFINE_bool(cache_enabled, true,
+            "if cache is enabled in replication process");
+BRPC_VALIDATE_GFLAG(cache_enabled, ::brpc::PassValidate);
+
+DEFINE_bool(oo_enabled, false,
+            "if cache is enabled in replication process");
+BRPC_VALIDATE_GFLAG(oo_enabled, ::brpc::PassValidate);
+
 struct GlobalExtension {
     SegmentLogStorage local_log;
     LocalRaftMetaStorage local_meta;
@@ -788,7 +796,7 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         _last_leader_timestamp = butil::monotonic_time_ms();
     }
     
-    // trace the sequence of the entries and periodically output it
+    // trace the sequence of the entries and periodically output them
     if (request->entries_size() > 0 && !from_append_entries_cache){
         int64_t _t_index = request->prev_log_index();
         for (int i = 0; i < request->entries_size(); i++) {
@@ -809,25 +817,25 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
     const int64_t prev_log_index = request->prev_log_index();
     const int64_t prev_log_term = request->prev_log_term();
     const int64_t local_prev_log_term = _log_manager->get_term(prev_log_index); // check the term continuity of the entries. but for ooEntries, prev_log_index cannot be obtained.
-    if (local_prev_log_term != prev_log_term) {
+    if (local_prev_log_term != prev_log_term && !FLAGS_oo_enabled) {
         int64_t last_index = _log_manager->last_log_index();
         int64_t saved_term = request->term();
         int     saved_entries_size = request->entries_size();
         std::string rpc_server_id = request->server_id();
-        if (!from_append_entries_cache && handle_out_of_order_append_entries(cntl, request, response, done, last_index)) {
+        if (FLAGS_cache_enabled && !from_append_entries_cache && handle_out_of_order_append_entries(cntl, request, response, done, last_index)) {
             // It's not safe to touch cntl/request/response/done after this point,
             // since the ownership is tranfered to the cache.
             lck.unlock();
             done_guard.release();
-            LOG(WARNING) << "node " << _group_id << ":" << _server_id
-                         << " cache out-of-order AppendEntries from " 
-                         << rpc_server_id
-                         << " in term " << saved_term
-                         << " prev_log_index " << prev_log_index
-                         << " prev_log_term " << prev_log_term
-                         << " local_prev_log_term " << local_prev_log_term
-                         << " last_log_index " << last_index
-                         << " entries_size " << saved_entries_size;
+            // LOG(WARNING) << "node " << _group_id << ":" << _server_id
+            //              << " cache out-of-order AppendEntries from " 
+            //              << rpc_server_id
+            //              << " in term " << saved_term
+            //              << " prev_log_index " << prev_log_index
+            //              << " prev_log_term " << prev_log_term
+            //              << " local_prev_log_term " << local_prev_log_term
+            //              << " last_log_index " << last_index
+            //              << " entries_size " << saved_entries_size;
             return;
         }
 
@@ -835,31 +843,37 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         response->set_term(_current_term);
         response->set_last_log_index(last_index);
         lck.unlock();
-        LOG(WARNING) << "node " << _group_id << ":" << _server_id
-                     << " reject term_unmatched AppendEntries from " 
-                     << request->server_id()
-                     << " in term " << request->term()
-                     << " prev_log_index " << request->prev_log_index()
-                     << " prev_log_term " << request->prev_log_term()
-                     << " local_prev_log_term " << local_prev_log_term
-                     << " last_log_index " << last_index
-                     << " entries_size " << request->entries_size()
-                     << " from_append_entries_cache: " << from_append_entries_cache;
+        // LOG(WARNING) << "node " << _group_id << ":" << _server_id
+        //              << " reject term_unmatched AppendEntries from " 
+        //              << request->server_id()
+        //              << " in term " << request->term()
+        //              << " prev_log_index " << request->prev_log_index()
+        //              << " prev_log_term " << request->prev_log_term()
+        //              << " local_prev_log_term " << local_prev_log_term
+        //              << " last_log_index " << last_index
+        //              << " entries_size " << request->entries_size()
+        //              << " from_append_entries_cache: " << from_append_entries_cache;
         return;
     }
 
+    /* if entries size = 0, it means that the leader has replicated all its entries to follower.
+       So follower tell leader its unreceived log entries (i.e., its last sequential log index.) */
     if (request->entries_size() == 0) {
         response->set_success(true);
         response->set_term(_current_term);
+        /* last sequential log index */
         response->set_last_log_index(_log_manager->last_log_index());
         response->set_readonly(false);
         lck.unlock();
         // see the comments at FollowerStableClosure::run()
+        /* last sequential committed index */
         _ballot_box->set_last_committed_index(
                 std::min(request->committed_index(),
                          prev_log_index));
         return;
     }
+
+    /* Process the reqeust without considering the sequential info. */
 
     // Parse request
     butil::IOBuf data_buf;
@@ -897,13 +911,15 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         }
     }
 
-    // // check out-of-order cache
-    // check_append_entries_cache(index);
+    // check out-of-order cache
+    // if (FLAGS_cache_enabled){
+    //     check_append_entries_cache(index);
+    // }
 
     FollowerStableClosure* c = new FollowerStableClosure(
             cntl, request, response, done_guard.release(),
             this, _current_term);
-    _log_manager->append_entries(&entries, c);
+    _log_manager->append_entries(&entries, c, FLAGS_oo_enabled);
 
     // update configuration after _log_manager updated its memory status
     _log_manager->check_and_set_configuration(&_conf);
@@ -1441,6 +1457,16 @@ bool NodeImpl::AppendEntriesCache::empty() const {
     return _rpc_map.empty();
 }
 
+void NodeImpl::check_append_entries_cache(int64_t local_last_index) {
+    if (!_append_entries_cache) {
+        return;
+    }
+    _append_entries_cache->process_runable_rpcs(local_last_index);
+    if (_append_entries_cache->empty()) {
+        delete _append_entries_cache;
+        _append_entries_cache = NULL;
+    }
+}
 bool NodeImpl::AppendEntriesCache::store(AppendEntriesRpc* rpc) {
     if (!_rpc_map.empty()) {
         bool need_clear = false;

@@ -48,14 +48,14 @@ static void* sender(void* arg){
         stub.write(&cntl, &request, &response, NULL);
 
         if (cntl.Failed()) {
-            LOG(WARNING) << "Fail to send request to " << leader_addr
-                        << " : " << cntl.ErrorText();
+            // LOG(WARNING) << "Fail to send request to " << leader_addr
+            //             << " : " << cntl.ErrorText();
         }
         if (!response.success()) {
-            LOG(WARNING) << "Fail to send request to " << leader_addr
-                        << ", redirecting to "
-                        << (response.has_redirect() 
-                                ? response.redirect() : "nowhere");
+            // LOG(WARNING) << "Fail to send request to " << leader_addr
+            //             << ", redirecting to "
+            //             << (response.has_redirect() 
+            //                     ? response.redirect() : "nowhere");
         }
         g_latency_recorder << cntl.latency_us();
     }

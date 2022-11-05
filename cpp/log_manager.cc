@@ -287,7 +287,7 @@ void LogManager::unsafe_truncate_suffix(const int64_t last_index_kept) {
 }
 
 int LogManager::check_and_resolve_conflict(
-            std::vector<LogEntry*> *entries, StableClosure* done) {
+            std::vector<LogEntry*> *entries, StableClosure* done, bool ooRep) {
     AsyncClosureGuard done_guard(done);   
     if (entries->front()->id.index == 0) {
         // Node is currently the leader and |entries| are from the user who 
@@ -302,12 +302,15 @@ int LogManager::check_and_resolve_conflict(
         // Node is currently a follower and |entries| are from the leader. We 
         // should check and resolve the confliction between the local logs and
         // |entries|
-        if (entries->front()->id.index > _last_log_index + 1) {
+        
+        /* It can happen when out-of-order replication is enabled */
+        if (!ooRep && entries->front()->id.index > _last_log_index + 1) {
             done->status().set_error(EINVAL, "There's gap between first_index=%" PRId64
                                      " and last_log_index=%" PRId64,
                                      entries->front()->id.index, _last_log_index);
             return -1;
         }
+
         const int64_t applied_index = _applied_id.index;
         if (entries->back()->id.index <= applied_index) {
             LOG(WARNING) << "Received entries of which the last_log="
@@ -326,18 +329,24 @@ int LogManager::check_and_resolve_conflict(
             // ones.
             size_t conflicting_index = 0;
             for (; conflicting_index < entries->size(); ++conflicting_index) {
-                if (unsafe_get_term((*entries)[conflicting_index]->id.index)
-                        != (*entries)[conflicting_index]->id.term) {
+                /* We need to save the out-of-order entries to WAL. If ooRep is enabled, unsafe(ooEntries) will return 0, but it is acceptable here.*/
+                int64_t target_term = unsafe_get_term((*entries)[conflicting_index]->id.index);
+                if ((!ooRep && target_term != (*entries)[conflicting_index]->id.term) || 
+                    (ooRep && target_term != 0 /* Target_term can be 0 because we accept ooRep */
+                           && target_term != (*entries)[conflicting_index]->id.term) /* If target_term != 0 and target_term is different from received entry, we still need to truncate them because we received entries from a leader with a newer term*/) {
                     break;
                 }
             }
             if (conflicting_index != entries->size()) {
+                /* It only happens when overlaps sequential entries. We don't check if overlaps ooEntries here */
+                /* If we meet conflictions before _last_log_index, it means we need to truncate all the entries before that index, no matter if it accepts ooRep. */
                 if ((*entries)[conflicting_index]->id.index <= _last_log_index) {
                     // Truncate all the conflicting entries to make local logs
                     // consensus with the leader.
                     unsafe_truncate_suffix(
                             (*entries)[conflicting_index]->id.index - 1);
                 }
+                /* If it happens, _last_log_index will be the last index of entry in this replication. */
                 _last_log_index = entries->back()->id.index;
             }  // else this is a duplicated AppendEntriesRequest, we have 
                // nothing to do besides releasing all the entries
@@ -360,7 +369,7 @@ int LogManager::check_and_resolve_conflict(
 }
 
 void LogManager::append_entries(
-            std::vector<LogEntry*> *entries, StableClosure* done) {
+            std::vector<LogEntry*> *entries, StableClosure* done, bool ooRep) {
     CHECK(done);
     if (_has_error.load(butil::memory_order_relaxed)) {
         for (size_t i = 0; i < entries->size(); ++i) {
@@ -380,7 +389,7 @@ void LogManager::append_entries(
         entries->clear();
         return;
     }
-
+    /* Now we get all of the vaild entries (note they still may overlap ooEntries)*/
     for (size_t i = 0; i < entries->size(); ++i) {
         // Add ref for disk_thread
         (*entries)[i]->AddRef();
@@ -392,7 +401,31 @@ void LogManager::append_entries(
 
     if (!entries->empty()) {
         done->_first_log_index = entries->front()->id.index;
-        _logs_in_memory.insert(_logs_in_memory.end(), entries->begin(), entries->end());
+        /* Find the position to insert, we need to change the _last_log_index if it connects the _last_log_index and first ooEntry */
+        std::deque<LogEntry*>::iterator it = _logs_in_memory.begin();
+        for (; it != _logs_in_memory.end(); ++it){
+            if ((*it)->id.index > entries->front()->id.index){
+                break;
+            }
+        }
+        std::vector<LogEntry*>::iterator it_entry = entries->begin();
+        while (it_entry != entries->end() && it+1 != _logs_in_memory.end()){
+            if ((*it_entry)->id.index != (*it+1)->id.index){
+                /* Earse overlapping entries */
+                _logs_in_memory.insert(it, *it_entry++);
+            } else {
+                /* Connect sequential entries */
+                (*it_entry)->Release();
+                entries->erase(it_entry);
+                it++;
+            }
+        }
+        while (it_entry != entries->end()){
+            _logs_in_memory.push_back(*it_entry++);
+        }
+        while (it+1 != _logs_in_memory.end() && (*it++)->id.index == _last_log_index + 1){
+            _last_log_index++;
+        }
     }
 
     done->_entries.swap(*entries);

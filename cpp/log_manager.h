@@ -60,7 +60,7 @@ public:
 
     // Append log entry vector and wait until it's stable (NOT COMMITTED!)
     // success return 0, fail return errno
-    void append_entries(std::vector<LogEntry*> *entries, StableClosure* done);
+    void append_entries(std::vector<LogEntry*> *entries, StableClosure* done, bool ooRep = false);
 
     // Notify the log manager about the latest snapshot, which indicates the
     // logs which can be safely truncated.
@@ -157,7 +157,7 @@ friend class AppendBatcher;
     WaitId notify_on_new_log(int64_t expected_last_log_index, WaitMeta* wm);
 
     int check_and_resolve_conflict(std::vector<LogEntry*>* entries, 
-                                   StableClosure* done);
+                                   StableClosure* done, bool ooRep = false);
 
     void unsafe_truncate_suffix(const int64_t last_index_kept);
 

@@ -61,6 +61,7 @@
         "hash_set": "cpp",
         "sstream": "cpp",
         "cinttypes": "cpp",
-        "*.inc": "cpp"
+        "*.inc": "cpp",
+        "fstream": "cpp"
     }
 }

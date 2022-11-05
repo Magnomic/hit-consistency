@@ -304,5 +304,7 @@ friend class FollowerStableClosure;
                                                         int64_t local_last_index);
 
         static void* handle_append_entries_from_cache(void* arg);
+
+        void check_append_entries_cache(int64_t local_last_index);
 };
 #endif 
