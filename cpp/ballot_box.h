@@ -72,6 +72,7 @@ private:
     butil::atomic<int64_t>                          _last_committed_index;
     int64_t                                         _pending_index;
     std::deque<Ballot>                              _pending_meta_queue;
+    std::deque<bool>                                _committed_index_queue;
 
 };
 

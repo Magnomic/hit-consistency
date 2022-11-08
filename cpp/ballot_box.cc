@@ -49,11 +49,12 @@ int BallotBox::commit_at(
     // FIXME(chenzhangyi01): The cricital section is unacceptable because it 
     // blocks all the other Replicators and LogManagers
 
-    /* TODO: _pending_queue will not contain committed ooEntries. */
+    /* TODO: _pending_queue still contain committed ooEntries. */
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
     if (_pending_index == 0) {
         return EINVAL;
     }
+    /* We still use _pending_index to denote the first index of _pending_queue*/
     if (last_log_index < _pending_index) {
         return 0;
     }
@@ -62,12 +63,15 @@ int BallotBox::commit_at(
     }
 
     int64_t last_committed_index = 0;
+    /* May not start from _pending_index when ooEntries option is enabled. */
     const int64_t start_at = std::max(_pending_index, first_log_index);
     Ballot::PosHint pos_hint;
     for (int64_t log_index = start_at; log_index <= last_log_index; ++log_index) {
         Ballot& bl = _pending_meta_queue[log_index - _pending_index];
+        _committed_index_queue[log_index - _pending_index] = true;
         pos_hint = bl.grant(peer, pos_hint);
-        if (bl.granted()) {
+        /* So here we cannot directly set last_committed index to log_index, unless it start from _pending_index. */
+        if (bl.granted() && start_at == _pending_index) {
             last_committed_index = log_index;
         }
     }
@@ -83,15 +87,23 @@ int BallotBox::commit_at(
     // removal request, we think it's safe to commit all the uncommitted 
     // previous logs, which is not well proved right now
     // TODO: add vlog when committing previous logs
-    for (int64_t index = _pending_index; index <= last_committed_index; ++index) {
-        _pending_meta_queue.pop_front();
+    int64_t oo_start(0);
+    int64_t oo_end(0);
+    if (start_at == _pending_index){
+        for (int64_t index = _pending_index; index <= last_committed_index; ++index) {
+            _pending_meta_queue.pop_front();
+            _committed_index_queue.pop_front();
+        }
+    
+        _pending_index = last_committed_index + 1;
+        _last_committed_index.store(last_committed_index, butil::memory_order_relaxed);
+    } else{
+        oo_start = start_at;
+        oo_end = last_log_index;
     }
-   
-    _pending_index = last_committed_index + 1;
-    _last_committed_index.store(last_committed_index, butil::memory_order_relaxed);
     lck.unlock();
     // The order doesn't matter
-    _waiter->on_committed(last_committed_index);
+    _waiter->on_committed(last_committed_index, oo_start, oo_end);
     return 0;
 }
 
@@ -183,6 +195,8 @@ int BallotBox::append_pending_task(const Configuration& conf, const Configuratio
     CHECK(_pending_index > 0);
     _pending_meta_queue.push_back(Ballot());
     _pending_meta_queue.back().swap(bl);
+    /* Initialize the uncommittd information */
+    _committed_index_queue.push_back(false);
     _closure_queue->append_pending_closure(closure);
     return 0;
 }

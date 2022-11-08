@@ -83,7 +83,7 @@ public:
     BRAFT_MOCK ~FSMCaller();
     int init(const FSMCallerOptions& options);
     int shutdown();
-    BRAFT_MOCK int on_committed(int64_t committed_index);
+    BRAFT_MOCK int on_committed(int64_t committed_index, int64_t start_index = 0, int64_t end_index = 0);
     int on_leader_stop(const butil::Status& status);
     int on_leader_start(int64_t term);
     int on_start_following(const LeaderChangeContext& start_following_context);
@@ -117,6 +117,12 @@ friend class IteratorImpl;
             // For applying log entry (including configuartion change)
             int64_t committed_index;
             
+            // For oo log entry (if has)
+            int64_t oo_start_index;
+
+            // For oo log entry (if has)
+            int64_t oo_end_index;
+
             // For on_leader_start
             int64_t term;
             

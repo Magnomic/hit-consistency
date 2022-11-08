@@ -165,9 +165,13 @@ void FSMCaller::do_shutdown() {
     }
 }
 
-int FSMCaller::on_committed(int64_t committed_index) {
+int FSMCaller::on_committed(int64_t committed_index, int64_t start_index, int64_t end_index) {
     ApplyTask t;
     t.type = COMMITTED;
+    if (end_index != 0){
+        t.oo_start_index = start_index;
+        t.oo_end_index = end_index;
+    }
     t.committed_index = committed_index;
     return bthread::execution_queue_execute(_queue_id, t);
 }
