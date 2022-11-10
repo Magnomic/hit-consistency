@@ -365,17 +365,15 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
     // LOG(INFO) << ss.str();
 
     bool valid_rpc = false;
-    // int64_t rpc_first_index = request->prev_log_index() + 1;
-    int64_t rpc_first_index = response->last_log_index() + 1;
+    int64_t rpc_first_index = request->prev_log_index() + 1;
     int64_t min_flying_index = r->_min_flying_index();
     CHECK_GT(min_flying_index, 0);
 
     for (std::deque<FlyingAppendEntriesRpc>::iterator rpc_it = r->_append_entries_in_fly.begin();
         rpc_it != r->_append_entries_in_fly.end(); ++rpc_it) {
-        /* We don't use rpc call to cancel the expired requests, because the rpc cannot be identified expired according to start index when ooEntries exists. */
-        // if (rpc_it->log_index > rpc_first_index) {
-        //     break;
-        // }
+        if (rpc_it->log_index > rpc_first_index) {
+            break;
+        }
         if (rpc_it->call_id == cntl->call_id()) {
             valid_rpc = true;
         }
@@ -482,7 +480,7 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
                                     << min_flying_index << ", " 
                                     << rpc_last_log_index
                                     << "] to peer " << r->_options.peer_id;
-    /* TODO: modify the ballot_box because response may commit ooEntries. */
+    /* TODO: modify replicator cannot commit repeated ooEntries. We need to know which entries have been committed and only pass the needed indexes to ballot_box. */
     if (entries_size > 0) {
         // r->_options.ballot_box->commit_at(
         //         min_flying_index, rpc_last_log_index,
@@ -499,6 +497,7 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
     }
     // A rpc is marked as success, means all request before it are success,
     // erase them sequentially.
+    /* TODO: save the committed indexes. Only remove itself and sequential committed entries in the queue. */
     while (!r->_append_entries_in_fly.empty() &&
            r->_append_entries_in_fly.front().log_index <= rpc_first_index) {
         r->_flying_append_entries_size -= r->_append_entries_in_fly.front().entries_size;

@@ -30,12 +30,12 @@ public:
     // Move to the next
     void next();
     LogEntry* entry() const { return _cur_entry; }
-    bool is_good() const { return _cur_index <= _committed_index && !has_error(); }
+    bool is_good() const { return (*_index_list)[_cur_index - _first_closure_index] <= _committed_index && !has_error(); }
     Closure* done() const;
     void set_error_and_rollback(size_t ntail, const butil::Status* st);
     bool has_error() const { return _error.type() != ERROR_TYPE_NONE; }
     const Error& error() const { return _error; }
-    int64_t index() const { return _cur_index; }
+    int64_t index() const { return (*_index_list)[_cur_index - _first_closure_index]; }
     void run_the_rest_closure_with_error();
 private:
     IteratorImpl(StateMachine* sm, LogManager* lm, 
@@ -43,18 +43,22 @@ private:
                  int64_t first_closure_index,
                  int64_t last_applied_index,
                  int64_t committed_index,
-                 butil::atomic<int64_t>* applying_index);
+                 butil::atomic<int64_t>* applying_index,
+                 std::deque<int64_t> *index_list);
     ~IteratorImpl() {}
 friend class FSMCaller;
     StateMachine* _sm;
     LogManager* _lm;
     std::vector<Closure*> *_closure;
+    /* _first_closure_index and _cur_index are used to calculate the offset here, not the actual index. */
     int64_t _first_closure_index;
+    /* _first_closure_index and _cur_index are used to calculate the offset here, not the actual index. */
     int64_t _cur_index;
     int64_t _committed_index;
     LogEntry* _cur_entry;
     butil::atomic<int64_t>* _applying_index;
     Error _error;
+    std::deque<int64_t> *_index_list;
 };
 
 struct FSMCallerOptions {
@@ -140,7 +144,7 @@ friend class IteratorImpl;
     static double get_cumulated_cpu_time(void* arg);
     static int run(void* meta, bthread::TaskIterator<ApplyTask>& iter);
     void do_shutdown(); //Closure* done);
-    void do_committed(int64_t committed_index);
+    void do_committed(int64_t st_committed_index, int64_t end_committed_index);
     void do_cleared(int64_t log_index, Closure* done, int error_code);
     void do_on_error(OnErrorClousre* done);
     void do_leader_stop(const butil::Status& status);
@@ -155,6 +159,7 @@ friend class IteratorImpl;
     StateMachine *_fsm;
     ClosureQueue* _closure_queue;
     butil::atomic<int64_t> _last_applied_index;
+    std::deque<bool> _oo_apply_queue;
     int64_t _last_applied_term;
     google::protobuf::Closure* _after_shutdown;
     NodeImpl* _node;

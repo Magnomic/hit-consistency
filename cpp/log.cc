@@ -51,14 +51,16 @@ enum CheckSumType {
 
 // Format of Header, all fields are in network order
 // | -------------------- term (64bits) -------------------------  |
+// | ------------------- index (64bits) -------------------------  |
 // | entry-type (8bits) | checksum_type (8bits) | reserved(16bits) |
 // | ------------------ data len (32bits) -----------------------  |
 // | data_checksum (32bits) | header checksum (32bits)             |
 
-const static size_t ENTRY_HEADER_SIZE = 24;
+const static size_t ENTRY_HEADER_SIZE = 32;
 
 struct Segment::EntryHeader {
     int64_t term;
+    int64_t index;
     int type;
     int checksum_type;
     uint32_t data_len;
@@ -153,17 +155,20 @@ int Segment::_load_entry(off_t offset, EntryHeader* head, butil::IOBuf* data,
     char header_buf[ENTRY_HEADER_SIZE];
     const char *p = (const char *)buf.fetch(header_buf, ENTRY_HEADER_SIZE);
     int64_t term = 0;
+    int64_t index = 0;
     uint32_t meta_field;
     uint32_t data_len = 0;
     uint32_t data_checksum = 0;
     uint32_t header_checksum = 0;
     RawUnpacker(p).unpack64((uint64_t&)term)
+                  .unpack64((uint64_t&)index)
                   .unpack32(meta_field)
                   .unpack32(data_len)
                   .unpack32(data_checksum)
                   .unpack32(header_checksum);
     EntryHeader tmp;
     tmp.term = term;
+    tmp.index = index;
     tmp.type = meta_field >> 24;
     tmp.checksum_type = (meta_field << 8) >> 24;
     tmp.data_len = data_len;
@@ -204,27 +209,33 @@ int Segment::_load_entry(off_t offset, EntryHeader* head, butil::IOBuf* data,
 
 int Segment::_get_meta(int64_t index, LogMeta* meta) const {
     BAIDU_SCOPED_LOCK(_mutex);
-    if (index > _last_index.load(butil::memory_order_relaxed) 
+    if (index > _max_index.load(butil::memory_order_relaxed) 
                     || index < _first_index) {
         // out of range
         BRAFT_VLOG << "_last_index=" << _last_index.load(butil::memory_order_relaxed)
                   << " _first_index=" << _first_index;
         return -1;
-    } else if (_last_index == _first_index - 1) {
+    } else if (_max_index == _first_index - 1) {
         BRAFT_VLOG << "_last_index=" << _last_index.load(butil::memory_order_relaxed)
                   << " _first_index=" << _first_index;
         // empty
         return -1;
     }
     int64_t meta_index = index - _first_index;
-    int64_t entry_cursor = _offset_and_term[meta_index].first;
-    int64_t next_cursor = (index < _last_index.load(butil::memory_order_relaxed))
-                          ? _offset_and_term[meta_index + 1].first : _bytes;
-    DCHECK_LT(entry_cursor, next_cursor);
-    meta->offset = entry_cursor;
-    meta->term = _offset_and_term[meta_index].second;
-    meta->length = next_cursor - entry_cursor;
-    return 0;
+    // int64_t entry_cursor = _offset_and_term[meta_index].first;
+    if (_offset_and_term_array[meta_index] != NULL){
+        int64_t entry_cursor = (*_offset_and_term_array[meta_index]).first;
+        // int64_t next_cursor = (index < _last_index.load(butil::memory_order_relaxed))
+        //                       ? _offset_and_term[meta_index + 1].first : _bytes;
+        int64_t next_cursor = (*_end_offset_and_term_array[meta_index]).first;
+        DCHECK_LT(entry_cursor, next_cursor);
+        meta->offset = entry_cursor;
+        meta->term = _offset_and_term[meta_index].second;
+        meta->length = next_cursor - entry_cursor;
+        return 0;
+    }
+    // empty
+    return -1;
 }
 
 int Segment::load(ConfigurationManager* configuration_manager) {
@@ -295,9 +306,11 @@ int Segment::load(ConfigurationManager* configuration_manager) {
                 break;
             }
         }
-        _offset_and_term.push_back(std::make_pair(entry_off, header.term));
+        // _offset_and_term.push_back(std::make_pair(entry_off, header.term));
+        *_offset_and_term_array[header.index - _first_index] = std::make_pair(entry_off, header.term);
         ++actual_last_index;
         entry_off += skip_len;
+        *_end_offset_and_term_array[header.index - _first_index] = std::make_pair(entry_off, header.term);
     }
 
     if (ret == 0 && !_is_open && actual_last_index < _last_index) {
@@ -365,6 +378,7 @@ int Segment::append(const LogEntry* entry) {
     const uint32_t meta_field = (entry->type << 24 ) | (_checksum_type << 16);
     RawPacker packer(header_buf);
     packer.pack64(entry->id.term)
+          .pack64(entry->id.index)
           .pack32(meta_field)
           .pack32((uint32_t)data.length())
           .pack32(get_checksum(_checksum_type, data));
@@ -388,9 +402,11 @@ int Segment::append(const LogEntry* entry) {
         for (;start < ARRAY_SIZE(pieces) && pieces[start]->empty(); ++start) {}
     }
     BAIDU_SCOPED_LOCK(_mutex);
-    _offset_and_term.push_back(std::make_pair(_bytes, entry->id.term));
+    // _offset_and_term.push_back(std::make_pair(_bytes, entry->id.term));
+    *_offset_and_term_array[entry->id.index - _first_index] = std::make_pair(_bytes, entry->id.term);
     _last_index.fetch_add(1, butil::memory_order_relaxed);
     _bytes += to_write;
+    *_end_offset_and_term_array[entry->id.index - _first_index] = std::make_pair(_bytes, entry->id.term);
 
     return 0;
 }
@@ -658,6 +674,7 @@ int SegmentLogStorage::init(ConfigurationManager* configuration_manager) {
     if (is_empty) {
         _first_log_index.store(1);
         _last_log_index.store(0);
+        _max_log_index.store(0);
         ret = save_meta(1);
     }
     return ret;
@@ -667,16 +684,20 @@ int64_t SegmentLogStorage::last_log_index() {
     return _last_log_index.load(butil::memory_order_acquire);
 }
 
+int64_t SegmentLogStorage::max_log_index() {
+    return _last_log_index.load(butil::memory_order_acquire);
+}
+
 int SegmentLogStorage::append_entries(const std::vector<LogEntry*>& entries) {
     if (entries.empty()) {
         return 0;
     }
-    if (_last_log_index.load(butil::memory_order_relaxed) + 1
-            != entries.front()->id.index) {
-        LOG(FATAL) << "There's gap between appending entries and _last_log_index"
-                   << " path: " << _path;
-        return -1;
-    }
+    // if (_last_log_index.load(butil::memory_order_relaxed) + 1
+    //         != entries.front()->id.index) {
+    //     LOG(FATAL) << "There's gap between appending entries and _last_log_index"
+    //                << " path: " << _path;
+    //     return -1;
+    // }
     scoped_refptr<Segment> last_segment = NULL;
     for (size_t i = 0; i < entries.size(); i++) {
         LogEntry* entry = entries[i];
@@ -689,7 +710,8 @@ int SegmentLogStorage::append_entries(const std::vector<LogEntry*>& entries) {
         if (0 != ret) {
             return i;
         }
-        _last_log_index.fetch_add(1, butil::memory_order_release);
+        // _last_log_index.fetch_add(1, butil::memory_order_release);
+        _last_log_index.store(std::max(_last_log_index.load(), entry->id.index), butil::memory_order_release);
         last_segment = segment;
     }
     last_segment->sync(_enable_sync);
@@ -708,7 +730,8 @@ int SegmentLogStorage::append_entry(const LogEntry* entry) {
     if (EEXIST == ret && entry->id.term != get_term(entry->id.index)) {
         return EINVAL;
     }
-    _last_log_index.fetch_add(1, butil::memory_order_release);
+    // _last_log_index.fetch_add(1, butil::memory_order_release);
+    _last_log_index.store(std::max(_last_log_index.load(), entry->id.index), butil::memory_order_release);
 
     return segment->sync(_enable_sync);
 }
@@ -1012,6 +1035,7 @@ int SegmentLogStorage::load_segments(ConfigurationManager* configuration_manager
             return ret;
         } 
         _last_log_index.store(segment->last_index(), butil::memory_order_release);
+        // _max_log_index.store(segment->max_index(), butil::memory_order_release);
     }
 
     // open segment
@@ -1032,11 +1056,16 @@ int SegmentLogStorage::load_segments(ConfigurationManager* configuration_manager
         } else {
             _last_log_index.store(_open_segment->last_index(), 
                                  butil::memory_order_release);
+            // _max_log_index.store(_open_segment->max_index(), 
+            //                      butil::memory_order_release);
         }
     }
     if (_last_log_index == 0) {
         _last_log_index = _first_log_index - 1;
     }
+    // if (_max_log_index == 0) {
+    //     _max_log_index = _first_log_index - 1;
+    // }
     return 0;
 }
 

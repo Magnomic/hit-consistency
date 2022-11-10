@@ -35,6 +35,9 @@ public:
     // last log index in log
     virtual int64_t last_log_index() = 0;
 
+    // last log index in log
+    virtual int64_t max_log_index() = 0;
+
     // get logentry by index
     virtual LogEntry* get_entry(const int64_t index) = 0;
 

@@ -39,6 +39,7 @@ int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
         caller->do_shutdown();
         return 0;
     }
+    int64_t min_committed_index = 2^63-1;
     int64_t max_committed_index = -1;
     int64_t counter = 0;
     for (; iter; ++iter) {
@@ -47,10 +48,13 @@ int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
                 max_committed_index = iter->committed_index;
                 counter++;
             }
+            if (iter->committed_index < min_committed_index) {
+                min_committed_index = iter->committed_index;
+            }
         } else {
             if (max_committed_index >= 0) {
                 caller->_cur_task = COMMITTED;
-                caller->do_committed(max_committed_index);
+                caller->do_committed(min_committed_index, max_committed_index);
                 max_committed_index = -1;
                 g_commit_tasks_batch_counter << counter;
                 counter = 0;
@@ -89,7 +93,7 @@ int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
     }
     if (max_committed_index >= 0) {
         caller->_cur_task = COMMITTED;
-        caller->do_committed(max_committed_index);
+        caller->do_committed(min_committed_index, max_committed_index);
         g_commit_tasks_batch_counter << counter;
         counter = 0;
     }
@@ -221,7 +225,7 @@ void FSMCaller::set_error(const Error& e) {
     }
 }
 
-void FSMCaller::do_committed(int64_t committed_index) {
+void FSMCaller::do_committed(int64_t st_committed_index, int64_t end_committed_index) {
     if (!_error.status().ok()) {
         return;
     }
@@ -229,16 +233,18 @@ void FSMCaller::do_committed(int64_t committed_index) {
                                         butil::memory_order_relaxed);
 
     // We can tolerate the disorder of committed_index
-    if (last_applied_index >= committed_index) {
+    if (last_applied_index >= end_committed_index) {
         return;
     }
     std::vector<Closure*> closure;
     int64_t first_closure_index = 0;
-    CHECK_EQ(0, _closure_queue->pop_closure_until(committed_index, &closure,
-                                                  &first_closure_index));
+    std::deque<int64_t> index_list;
+    /* If st_committed_index = _first_index in closure_queue, we pop them.*/
+    CHECK_EQ(0, _closure_queue->pop_closure_until(st_committed_index, end_committed_index, &closure,
+                                                  &first_closure_index, &index_list));
 
     IteratorImpl iter_impl(_fsm, _log_manager, &closure, first_closure_index,
-                 last_applied_index, committed_index, &_applying_index);
+                 last_applied_index, end_committed_index, &_applying_index, &index_list);
     for (; iter_impl.is_good();) {
         if (iter_impl.entry()->type != ENTRY_TYPE_DATA) {
             if (iter_impl.entry()->type == ENTRY_TYPE_CONFIGURATION) {
@@ -274,7 +280,18 @@ void FSMCaller::do_committed(int64_t committed_index) {
     const int64_t last_index = iter_impl.index() - 1;
     const int64_t last_term = _log_manager->get_term(last_index);
     LogId last_applied_id(last_index, last_term);
-    _last_applied_index.store(committed_index, butil::memory_order_release);
+    for (int64_t i = first_closure_index; i<last_index; i++){
+        if (i - _last_applied_index > _oo_apply_queue.size()){
+            _oo_apply_queue.push_back(false);
+        } else {
+            _oo_apply_queue[i - _last_applied_index] = true;
+        }
+    }
+    while (_oo_apply_queue.front()){
+        _oo_apply_queue.pop_front();
+        last_applied_index++;
+    }
+    _last_applied_index.store(last_applied_index, butil::memory_order_release);
     _last_applied_term = last_term;
     _log_manager->set_applied_id(last_applied_id);
 }
@@ -400,7 +417,8 @@ IteratorImpl::IteratorImpl(StateMachine* sm, LogManager* lm,
                           int64_t first_closure_index,
                           int64_t last_applied_index, 
                           int64_t committed_index,
-                          butil::atomic<int64_t>* applying_index)
+                          butil::atomic<int64_t>* applying_index,
+                          std::deque<int64_t> *index_list)
         : _sm(sm)
         , _lm(lm)
         , _closure(closure)
@@ -409,6 +427,7 @@ IteratorImpl::IteratorImpl(StateMachine* sm, LogManager* lm,
         , _committed_index(committed_index)
         , _cur_entry(NULL)
         , _applying_index(applying_index)
+        , _index_list(index_list)
 { next(); }
 
 void IteratorImpl::next() {
@@ -418,16 +437,18 @@ void IteratorImpl::next() {
     }
     if (_cur_index <= _committed_index) {
         ++_cur_index;
+        /* We use the indexes in _index_list. */
+        int64_t actual_index = (*_index_list)[_cur_index - _first_closure_index];
         if (_cur_index <= _committed_index) {
-            _cur_entry = _lm->get_entry(_cur_index);
+            _cur_entry = _lm->get_entry(actual_index);
             if (_cur_entry == NULL) {
                 _error.set_type(ERROR_TYPE_LOG);
                 _error.status().set_error(-1,
                         "Fail to get entry at index=%" PRId64
                         " while committed_index=%" PRId64,
-                        _cur_index, _committed_index);
+                        actual_index, _committed_index);
             }
-            _applying_index->store(_cur_index, butil::memory_order_relaxed);
+            _applying_index->store(actual_index, butil::memory_order_relaxed);
         }
     }
 }

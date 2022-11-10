@@ -33,6 +33,7 @@ LogManager::LogManager()
     , _next_wait_id(0)
     , _first_log_index(0)
     , _last_log_index(0)
+    , _max_log_index(0)
 {
     CHECK_EQ(0, start_disk_thread());
 }
@@ -56,6 +57,7 @@ int LogManager::init(const LogManagerOptions &options) {
     }
     _first_log_index = _log_storage->first_log_index();
     _last_log_index = _log_storage->last_log_index();
+    _max_log_index = _log_storage->max_log_index();
     _disk_id.index = _last_log_index;
     _disk_id.term = _log_storage->get_term(_last_log_index);
     return 0;
@@ -360,6 +362,7 @@ int LogManager::check_and_resolve_conflict(
             entries->erase(entries->begin(), 
                            entries->begin() + conflicting_index);
         }
+        _max_log_index = std::max(_max_log_index, entries->back()->id.index);
         done_guard.release();
         return 0;
     }
@@ -630,7 +633,7 @@ int64_t LogManager::unsafe_get_term(const int64_t index) {
     // out of range, direct return NULL
     // check this after check last_snapshot_id, because it is likely that
     // last_snapshot_id < first_log_index
-    if (index > _last_log_index || index < _first_log_index) {
+    if (index > _max_log_index || index < _first_log_index) {
         return 0;
     }
 
@@ -650,7 +653,7 @@ int64_t LogManager::get_term(const int64_t index) {
     // out of range, direct return NULL
     // check this after check last_snapshot_id, because it is likely that
     // last_snapshot_id < first_log_index
-    if (index > _last_log_index || index < _first_log_index) {
+    if (index > _max_log_index || index < _first_log_index) {
         return 0;
     }
 
@@ -667,7 +670,7 @@ LogEntry* LogManager::get_entry(const int64_t index) {
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
 
     // out of range, direct return NULL
-    if (index > _last_log_index || index < _first_log_index) {
+    if (index > _max_log_index || index < _first_log_index) {
         return NULL;
     }
 

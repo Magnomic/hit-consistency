@@ -77,6 +77,10 @@ public:
         return _last_index.load(butil::memory_order_consume);
     }
 
+    int64_t max_index() const {
+        return _max_index.load(butil::memory_order_consume);
+    }
+
     std::string file_name();
 private:
 friend class butil::RefCountedThreadSafe<Segment>;
@@ -108,9 +112,12 @@ friend class butil::RefCountedThreadSafe<Segment>;
     bool _sequential;
     const int64_t _first_index;
     butil::atomic<int64_t> _last_index;
+    butil::atomic<int64_t> _max_index;
     int _checksum_type;
     // 这个vector必须是有序的
     std::vector<std::pair<int64_t/*offset*/, int64_t/*term*/> > _offset_and_term;
+    std::pair<int64_t/*offset*/, int64_t/*term*/> *_offset_and_term_array[1000000]={ NULL };
+    std::pair<int64_t/*offset*/, int64_t/*term*/> *_end_offset_and_term_array[1000000]={ NULL };
     // 虽然我没感觉这个term有啥用，但是还是加进去吧
     std::vector<std::pair<int64_t/*end_offset*/, int64_t/*index*/> > _end_offset_and_index;
 };
@@ -123,6 +130,7 @@ public:
         : _path(path)
         , _first_log_index(1)
         , _last_log_index(0)
+        , _max_log_index(0)
         , _checksum_type(0)
         , _enable_sync(enable_sync)
     {} 
@@ -130,6 +138,7 @@ public:
     SegmentLogStorage()
         : _first_log_index(1)
         , _last_log_index(0)
+        , _max_log_index(0)
         , _checksum_type(0)
         , _enable_sync(true)
     {}
@@ -146,6 +155,8 @@ public:
 
     // last log index in log
     virtual int64_t last_log_index();
+
+    virtual int64_t max_log_index();
 
     // get logentry by index
     virtual LogEntry* get_entry(const int64_t index);
@@ -195,6 +206,7 @@ private:
     std::string _path;
     butil::atomic<int64_t> _first_log_index;
     butil::atomic<int64_t> _last_log_index;
+    butil::atomic<int64_t> _max_log_index;
     raft::raft_mutex_t _mutex;
     SegmentMap _segments;
     scoped_refptr<Segment> _open_segment;

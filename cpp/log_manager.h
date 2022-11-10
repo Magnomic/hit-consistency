@@ -195,6 +195,8 @@ friend class AppendBatcher;
     // 连续达到的最大index
     int64_t _last_log_index;
     // 乱序达到的最大index
+    int64_t _max_log_index;
+
     LogId _last_snapshot_id;
     // the virtual first log, for finding next_index of replicator, which 
     // can avoid install_snapshot too often in extreme case where a follower's

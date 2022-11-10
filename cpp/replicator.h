@@ -150,7 +150,7 @@ private:
     void _cancel_append_entries_rpcs();
     void _reset_next_index();
     int64_t _min_flying_index() {
-        return _next_index - _flying_append_entries_size;
+        return _append_entries_in_fly.front().log_index;
     }
     int _change_readonly_config(bool readonly);
 
