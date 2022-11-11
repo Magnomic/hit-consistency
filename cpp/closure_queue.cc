@@ -44,43 +44,34 @@ void ClosureQueue::append_pending_closure(Closure* c) {
     _has_committed_queue.push_back(false);
 }
 
-int ClosureQueue::pop_closure_until(int64_t from_index, int64_t to_index, 
-                                    std::vector<Closure*> *out, int64_t *out_first_index, std::deque<int64_t> *index_list) {
+int ClosureQueue::pop_closure_until(int64_t to_index, std::deque<int64_t> _oo_committed_entries, 
+                                    std::vector<Closure*> *out, int64_t *out_first_index) {
     out->clear();
     BAIDU_SCOPED_LOCK(_mutex);
-    if (_queue.empty() || to_index < _first_index) {
-        *out_first_index = to_index + 1;
+    if (_queue.empty() || _oo_committed_entries.back() < _first_index) {
+        *out_first_index = _oo_committed_entries.back() + 1;
         return 0;
     }
-    if (to_index > _first_index + (int64_t)_queue.size() - 1) {
+    if (_oo_committed_entries.back() > _first_index + (int64_t)_queue.size() - 1) {
         CHECK(false) << "Invalid index=" << to_index
                      << " _first_index=" << _first_index
                      << " _closure_queue_size=" << _queue.size();
         return -1;
     }
-    *out_first_index = std::max(_first_index, from_index);
+    *out_first_index = _first_index  < to_index ? _first_index : _oo_committed_entries.front();
     std::deque<Closure*>::iterator it_clo(_queue.begin());
     std::deque<bool>::iterator it_com(_has_committed_queue.begin());
     /* If commit ooEntries*/
-    if (from_index > _first_index){
-        it_clo += from_index - _first_index;
-        it_com += from_index - _first_index;
-        for (int64_t i = from_index; i < to_index; i++){
-            if (!*it_com){
-                out->push_back(*it_clo);
-                index_list->push_back(i);
-                *it_com = true;
-            } 
-            it_clo++;
-            it_com++;
-        }
-    } else {
-        for (int64_t i = *out_first_index; i <= to_index; ++i) {
+    while (!_oo_committed_entries.empty() || _first_index < to_index){
+        if (_first_index < to_index){
             out->push_back(_queue.front());
             _queue.pop_front();
             _has_committed_queue.pop_front();
+            _first_index++;
+        } else {
+            out->push_back(_queue[_oo_committed_entries.front() - _first_index]);
+            _has_committed_queue[_oo_committed_entries.front() - _first_index] = true;
         }
-        _first_index = to_index + 1;
     }
     while (_has_committed_queue.front()){
         _queue.pop_front();

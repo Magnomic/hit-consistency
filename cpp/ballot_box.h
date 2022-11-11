@@ -39,8 +39,7 @@ public:
 
     // Called by leader, otherwise the behavior is undefined
     // Set logs in [first_log_index, last_log_index] are stable at |peer|.
-    int commit_at(int64_t first_log_index, int64_t last_log_index,
-                  const PeerId& peer);
+    int commit_at(std::deque<int64_t> commit_indexes, const PeerId& peer);
 
     // Called when a candidate becomes the new leader, otherwise the behavior is
     // undefined.

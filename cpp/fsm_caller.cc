@@ -39,7 +39,7 @@ int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
         caller->do_shutdown();
         return 0;
     }
-    int64_t min_committed_index = 2^63-1;
+    std::deque<int64_t> oo_committed_entries;
     int64_t max_committed_index = -1;
     int64_t counter = 0;
     for (; iter; ++iter) {
@@ -48,13 +48,14 @@ int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
                 max_committed_index = iter->committed_index;
                 counter++;
             }
-            if (iter->committed_index < min_committed_index) {
-                min_committed_index = iter->committed_index;
+            while (!(*iter->oo_committed_entries).empty()){
+                oo_committed_entries.push_back((*iter->oo_committed_entries).front());
+                (*iter->oo_committed_entries).pop_front();
             }
         } else {
             if (max_committed_index >= 0) {
                 caller->_cur_task = COMMITTED;
-                caller->do_committed(min_committed_index, max_committed_index);
+                caller->do_committed(max_committed_index, (*iter->oo_committed_entries));
                 max_committed_index = -1;
                 g_commit_tasks_batch_counter << counter;
                 counter = 0;
@@ -93,7 +94,7 @@ int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
     }
     if (max_committed_index >= 0) {
         caller->_cur_task = COMMITTED;
-        caller->do_committed(min_committed_index, max_committed_index);
+        caller->do_committed(max_committed_index, oo_committed_entries);
         g_commit_tasks_batch_counter << counter;
         counter = 0;
     }
@@ -169,13 +170,10 @@ void FSMCaller::do_shutdown() {
     }
 }
 
-int FSMCaller::on_committed(int64_t committed_index, int64_t start_index, int64_t end_index) {
+int FSMCaller::on_committed(int64_t committed_index, std::deque<int64_t> _oo_committed_entries) {
     ApplyTask t;
     t.type = COMMITTED;
-    if (end_index != 0){
-        t.oo_start_index = start_index;
-        t.oo_end_index = end_index;
-    }
+    *t.oo_committed_entries = _oo_committed_entries;
     t.committed_index = committed_index;
     return bthread::execution_queue_execute(_queue_id, t);
 }
@@ -196,6 +194,7 @@ private:
 int FSMCaller::on_error(const Error& e) {
     OnErrorClousre* c = new OnErrorClousre(e);
     ApplyTask t;
+    t.oo_committed_entries = NULL;
     t.type = ERROR;
     t.done = c;
     if (bthread::execution_queue_execute(_queue_id, t, 
@@ -225,12 +224,14 @@ void FSMCaller::set_error(const Error& e) {
     }
 }
 
-void FSMCaller::do_committed(int64_t st_committed_index, int64_t end_committed_index) {
+void FSMCaller::do_committed(int64_t committed_index, std::deque<int64_t> _oo_committed_entries) {
     if (!_error.status().ok()) {
         return;
     }
     int64_t last_applied_index = _last_applied_index.load(
                                         butil::memory_order_relaxed);
+
+    int64_t end_committed_index = _oo_committed_entries.size() != 0 ? _oo_committed_entries.back() : committed_index;
 
     // We can tolerate the disorder of committed_index
     if (last_applied_index >= end_committed_index) {
@@ -238,13 +239,12 @@ void FSMCaller::do_committed(int64_t st_committed_index, int64_t end_committed_i
     }
     std::vector<Closure*> closure;
     int64_t first_closure_index = 0;
-    std::deque<int64_t> index_list;
     /* If st_committed_index = _first_index in closure_queue, we pop them.*/
-    CHECK_EQ(0, _closure_queue->pop_closure_until(st_committed_index, end_committed_index, &closure,
-                                                  &first_closure_index, &index_list));
+    CHECK_EQ(0, _closure_queue->pop_closure_until(committed_index, _oo_committed_entries, &closure,
+                                                  &first_closure_index));
 
     IteratorImpl iter_impl(_fsm, _log_manager, &closure, first_closure_index,
-                 last_applied_index, end_committed_index, &_applying_index, &index_list);
+                 last_applied_index, end_committed_index, &_applying_index, &_oo_committed_entries);
     for (; iter_impl.is_good();) {
         if (iter_impl.entry()->type != ENTRY_TYPE_DATA) {
             if (iter_impl.entry()->type == ENTRY_TYPE_CONFIGURATION) {
@@ -300,6 +300,7 @@ void FSMCaller::do_committed(int64_t st_committed_index, int64_t end_committed_i
 int FSMCaller::on_leader_stop(const butil::Status& status) {
     ApplyTask task;
     task.type = LEADER_STOP;
+    task.oo_committed_entries = NULL;
     butil::Status* on_leader_stop_status = new butil::Status(status);
     task.status = on_leader_stop_status;
     if (bthread::execution_queue_execute(_queue_id, task) != 0) {
@@ -312,6 +313,7 @@ int FSMCaller::on_leader_stop(const butil::Status& status) {
 int FSMCaller::on_leader_start(int64_t term) {
     ApplyTask task;
     task.type = LEADER_START;
+    task.oo_committed_entries = NULL;
     task.term = term;
     return bthread::execution_queue_execute(_queue_id, task);
 }
@@ -327,6 +329,7 @@ void FSMCaller::do_leader_start(int64_t term) {
 int FSMCaller::on_start_following(const LeaderChangeContext& start_following_context) {
     ApplyTask task;
     task.type = START_FOLLOWING;
+    task.oo_committed_entries = NULL;
     LeaderChangeContext* context  = new LeaderChangeContext(start_following_context.leader_id(), 
             start_following_context.term(), start_following_context.status());
     task.leader_change_context = context;
@@ -340,6 +343,7 @@ int FSMCaller::on_start_following(const LeaderChangeContext& start_following_con
 int FSMCaller::on_stop_following(const LeaderChangeContext& stop_following_context) {
     ApplyTask task;
     task.type = STOP_FOLLOWING;
+    task.oo_committed_entries = NULL;
     LeaderChangeContext* context = new LeaderChangeContext(stop_following_context.leader_id(), 
             stop_following_context.term(), stop_following_context.status());
     task.leader_change_context = context;

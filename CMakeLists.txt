@@ -134,3 +134,19 @@ add_executable(raft_server ./examples/raft_server.cc ${PROTO_SRC} ${PROTO_HEADER
 
 target_link_libraries(raft_client ${BRPC_LIB} ${DYNAMIC_LIB})
 target_link_libraries(raft_server ${BRPC_LIB} ${DYNAMIC_LIB})
+
+enable_testing()
+add_subdirectory(third_party/googletest-release-1.10.0)
+include_directories(third_party/googletest-release-1.10.0/googletest/include)
+
+set(GTEST_LIB gtest gtest_main)
+
+add_executable(test_main test/tests_main.cc ${PROTO_SRC} ${PROTO_HEADER} ${SOURCES})
+target_link_libraries(test_main gtest gtest_main ${BRPC_LIB} ${DYNAMIC_LIB})
+
+add_test(NAME test_main COMMAND test_main)
+
+add_executable(test_log test/test_log.cc ${PROTO_SRC} ${PROTO_HEADER} ${SOURCES})
+target_link_libraries(test_log gtest gtest_main ${BRPC_LIB} ${DYNAMIC_LIB})
+
+add_test(NAME test_log COMMAND test_log)

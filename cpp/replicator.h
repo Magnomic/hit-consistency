@@ -207,7 +207,8 @@ private:
     
     brpc::Channel _sending_channel;
     int64_t _next_index;
-    std::deque<int64_t> _oo_committed_indexes;
+    std::deque<bool> _oo_committed_entries;
+    int64_t _oo_start_index;
     int64_t _flying_append_entries_size;
     int _consecutive_error_times;
     bool _has_succeeded;
@@ -220,6 +221,7 @@ private:
     int64_t _readonly_index;
     Stat _st;
     std::deque<FlyingAppendEntriesRpc> _append_entries_in_fly;
+    std::deque<bool> _status_append_entries_in_fly;
     brpc::CallId _install_snapshot_in_fly;
     brpc::CallId _heartbeat_in_fly;
     brpc::CallId _timeout_now_in_fly;

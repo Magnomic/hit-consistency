@@ -87,7 +87,7 @@ public:
     BRAFT_MOCK ~FSMCaller();
     int init(const FSMCallerOptions& options);
     int shutdown();
-    BRAFT_MOCK int on_committed(int64_t committed_index, int64_t start_index = 0, int64_t end_index = 0);
+    BRAFT_MOCK int on_committed(int64_t committed_index, std::deque<int64_t> _oo_committed_entries);
     int on_leader_stop(const butil::Status& status);
     int on_leader_start(int64_t term);
     int on_start_following(const LeaderChangeContext& start_following_context);
@@ -122,10 +122,7 @@ friend class IteratorImpl;
             int64_t committed_index;
             
             // For oo log entry (if has)
-            int64_t oo_start_index;
-
-            // For oo log entry (if has)
-            int64_t oo_end_index;
+            std::deque<int64_t> *oo_committed_entries;
 
             // For on_leader_start
             int64_t term;
@@ -144,7 +141,7 @@ friend class IteratorImpl;
     static double get_cumulated_cpu_time(void* arg);
     static int run(void* meta, bthread::TaskIterator<ApplyTask>& iter);
     void do_shutdown(); //Closure* done);
-    void do_committed(int64_t st_committed_index, int64_t end_committed_index);
+    void do_committed(int64_t committed_index, std::deque<int64_t> oo_committed_entries);
     void do_cleared(int64_t log_index, Closure* done, int error_code);
     void do_on_error(OnErrorClousre* done);
     void do_leader_stop(const butil::Status& status);

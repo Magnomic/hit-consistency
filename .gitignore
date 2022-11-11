@@ -6,4 +6,10 @@ raft_client
 raft_server
 Makefile
 .vscode/*
-data_*
+data*
+lib
+Testing/
+third_party
+compile_commands.json
+CTestTestfile.cmake
+/test_*

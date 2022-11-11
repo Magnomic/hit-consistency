@@ -74,6 +74,7 @@ Replicator::Replicator()
     , _install_snapshot_counter(0)
     , _readonly_index(0)
     , _wait_id(0)
+    , _oo_start_index(0)
     , _is_waiter_canceled(false)
     , _catchup_closure(NULL)
 {
@@ -369,12 +370,15 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
     int64_t min_flying_index = r->_min_flying_index();
     CHECK_GT(min_flying_index, 0);
 
+    std::deque<bool>::iterator status_it = r->_status_append_entries_in_fly.begin();
+
     for (std::deque<FlyingAppendEntriesRpc>::iterator rpc_it = r->_append_entries_in_fly.begin();
         rpc_it != r->_append_entries_in_fly.end(); ++rpc_it) {
+        ++status_it;
         if (rpc_it->log_index > rpc_first_index) {
             break;
         }
-        if (rpc_it->call_id == cntl->call_id()) {
+        if (rpc_it->call_id == cntl->call_id() && *status_it) {
             valid_rpc = true;
         }
     }
@@ -456,6 +460,7 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
         r->_send_empty_entries(false);
         return;
     }
+    
 
     ss << " success";
     BRAFT_VLOG << ss.str();
@@ -472,6 +477,8 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
         r->_last_rpc_send_timestamp = rpc_send_time; 
     }
     /* All of these entries are presisted. */
+    *status_it = false;
+    
     const int entries_size = request->entries_size();
     const int64_t rpc_last_log_index = request->prev_log_index() + entries_size;
     const int64_t rpc_first_log_index = request->prev_log_index() + 1;
@@ -480,28 +487,43 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
                                     << min_flying_index << ", " 
                                     << rpc_last_log_index
                                     << "] to peer " << r->_options.peer_id;
-    /* TODO: modify replicator cannot commit repeated ooEntries. We need to know which entries have been committed and only pass the needed indexes to ballot_box. */
+    /* TODO: modify replicator so that it cannot commit repeated ooEntries. We need to know which entries have been committed and only pass the needed indexes to ballot_box. */
+    std::deque<int64_t> commit_indexes;
+
     if (entries_size > 0) {
         // r->_options.ballot_box->commit_at(
         //         min_flying_index, rpc_last_log_index,
         //         r->_options.peer_id);
-        /* Commit from first_index to last_index */
-        r->_options.ballot_box->commit_at(
-                rpc_first_log_index, rpc_last_log_index,
-                r->_options.peer_id);
+        /* get uncommitted entries from first_index to last_index */
+        std::deque<bool>::iterator commit_it = r->_oo_committed_entries.begin() + (rpc_first_index - r->_oo_start_index);
+        int64_t actual_index = rpc_first_index;
+        for (;commit_it!=r->_oo_committed_entries.end();++commit_it){
+            if (!*commit_it){
+                *commit_it=true;
+                commit_indexes.push_back(actual_index++);
+            }
+        }
+
+        r->_options.ballot_box->commit_at(commit_indexes, r->_options.peer_id);
         g_send_entries_latency << cntl->latency_us();
         if (cntl->request_attachment().size() > 0) {
             g_normalized_send_entries_latency << 
                 cntl->latency_us() * 1024 / cntl->request_attachment().size();
         }
+        while (r->_oo_committed_entries.front()){
+            r->_oo_committed_entries.pop_front();
+            r->_oo_start_index++;
+        }
     }
     // A rpc is marked as success, means all request before it are success,
     // erase them sequentially.
     /* TODO: save the committed indexes. Only remove itself and sequential committed entries in the queue. */
-    while (!r->_append_entries_in_fly.empty() &&
-           r->_append_entries_in_fly.front().log_index <= rpc_first_index) {
+    while (!r->_append_entries_in_fly.empty() && 
+            (!r->_status_append_entries_in_fly.front() || 
+                r->_append_entries_in_fly.front().log_index + r->_append_entries_in_fly.front().entries_size < r->_oo_start_index)) {
         r->_flying_append_entries_size -= r->_append_entries_in_fly.front().entries_size;
         r->_append_entries_in_fly.pop_front();
+        r->_status_append_entries_in_fly.pop_front();
     }
     r->_has_succeeded = true;
     r->_notify_on_caught_up(0, false);
@@ -564,6 +586,7 @@ void Replicator::_send_empty_entries(bool is_heartbeat) {
         CHECK(_append_entries_in_fly.empty());
         CHECK_EQ(_flying_append_entries_size, 0);
         _append_entries_in_fly.push_back(FlyingAppendEntriesRpc(_next_index, 0, cntl->call_id()));
+        _status_append_entries_in_fly.push_back(true);
         _append_entries_counter++;
     }
 
@@ -656,9 +679,13 @@ void Replicator::_send_entries() {
 
     _append_entries_in_fly.push_back(FlyingAppendEntriesRpc(_next_index,
                                      request->entries_size(), cntl->call_id()));
+    _status_append_entries_in_fly.push_back(true);
     _append_entries_counter++;
     _next_index += request->entries_size();
     _flying_append_entries_size += request->entries_size();
+    while (_oo_start_index + _oo_committed_entries.size() < _next_index){
+        _oo_committed_entries.push_back(false);
+    }
     
     g_send_entries_batch_counter << request->entries_size();
 
@@ -885,10 +912,18 @@ void Replicator::_cancel_append_entries_rpcs() {
         brpc::StartCancel(rpc_it->call_id);
     }
     _append_entries_in_fly.clear();
+    _status_append_entries_in_fly.clear();
 }
 
 void Replicator::_reset_next_index() {
-    _next_index -= _flying_append_entries_size;
+    while (!_append_entries_in_fly.empty() && !_status_append_entries_in_fly.front()) {
+        _flying_append_entries_size -= _append_entries_in_fly.front().entries_size;
+        _append_entries_in_fly.pop_front();
+        _status_append_entries_in_fly.pop_front();
+    }
+    if (!_append_entries_in_fly.empty()){
+        _next_index = _append_entries_in_fly.front().log_index;
+    }
     _flying_append_entries_size = 0;
     _cancel_append_entries_rpcs();
     _is_waiter_canceled = true;

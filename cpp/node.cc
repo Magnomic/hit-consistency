@@ -58,9 +58,12 @@ LeaderStableClosure::LeaderStableClosure(const NodeId& node_id,
 void LeaderStableClosure::Run() {
     if (status().ok()) {
         if (_ballot_box) {
+            std::deque<int64_t> commit_indexes;
+            for (int64_t i= _first_log_index; i < _first_log_index + _nentries; i++){
+                commit_indexes.push_back(i);
+            }
             // ballot_box check quorum ok, will call fsm_caller
-            _ballot_box->commit_at(
-                    _first_log_index, _first_log_index + _nentries - 1, _node_id.peer_id);
+            _ballot_box->commit_at(commit_indexes, _node_id.peer_id);
         }
     } else {
         LOG(ERROR) << "node " << _node_id << " append [" << _first_log_index << ", "
