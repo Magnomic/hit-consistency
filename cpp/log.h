@@ -21,14 +21,14 @@ public:
         : _path(path), _bytes(0),
         _fd(-1), _is_open(true),
         _first_index(first_index), _last_index(first_index - 1),
-        _checksum_type(checksum_type)
+        _checksum_type(checksum_type), _offset_and_term_array(100000, std::make_pair(-1, -1)), _end_offset_and_term_array(100000, std::make_pair(-1, -1))
     {}
     Segment(const std::string& path, const int64_t first_index, const int64_t last_index,
             int checksum_type)
         : _path(path), _bytes(0),
         _fd(-1), _is_open(false),
         _first_index(first_index), _last_index(last_index),
-        _checksum_type(checksum_type)
+        _checksum_type(checksum_type), _offset_and_term_array(100000, std::make_pair(-1, -1)), _end_offset_and_term_array(100000, std::make_pair(-1, -1))
     {}
 
     struct EntryHeader;
@@ -116,8 +116,8 @@ friend class butil::RefCountedThreadSafe<Segment>;
     int _checksum_type;
     // 这个vector必须是有序的
     std::vector<std::pair<int64_t/*offset*/, int64_t/*term*/> > _offset_and_term;
-    std::pair<int64_t/*offset*/, int64_t/*term*/> *_offset_and_term_array[1000000]={ NULL };
-    std::pair<int64_t/*offset*/, int64_t/*term*/> *_end_offset_and_term_array[1000000]={ NULL };
+    std::vector<std::pair<int64_t/*offset*/, int64_t/*term*/>> _offset_and_term_array;
+    std::vector<std::pair<int64_t/*offset*/, int64_t/*term*/>> _end_offset_and_term_array;
     // 虽然我没感觉这个term有啥用，但是还是加进去吧
     std::vector<std::pair<int64_t/*end_offset*/, int64_t/*index*/> > _end_offset_and_index;
 };

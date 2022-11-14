@@ -18,11 +18,11 @@ static bool valid_percentile(const char*, int32_t v) {
     return v > 0 && v < 100;
 }
 
-const bool ALLOW_UNUSED dummy_bvar_counter_p1 = GFLAGS_NS::RegisterFlagValidator(
+const bool ALLOW_UNUSED dummy_bvar_counter_p1 = gflags::RegisterFlagValidator(
     &FLAGS_bvar_counter_p1, valid_percentile);
-const bool ALLOW_UNUSED dummy_bvar_counter_p2 = GFLAGS_NS::RegisterFlagValidator(
+const bool ALLOW_UNUSED dummy_bvar_counter_p2 = gflags::RegisterFlagValidator(
     &FLAGS_bvar_counter_p2, valid_percentile);
-const bool ALLOW_UNUSED dummy_bvar_counter_p3 = GFLAGS_NS::RegisterFlagValidator(
+const bool ALLOW_UNUSED dummy_bvar_counter_p3 = gflags::RegisterFlagValidator(
     &FLAGS_bvar_counter_p3, valid_percentile);
 
 namespace detail {

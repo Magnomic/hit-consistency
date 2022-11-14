@@ -173,6 +173,10 @@ int Segment::_load_entry(off_t offset, EntryHeader* head, butil::IOBuf* data,
     tmp.checksum_type = (meta_field << 8) >> 24;
     tmp.data_len = data_len;
     tmp.data_checksum = data_checksum;
+    
+    if (tmp.term == -1){
+        return -2;
+    }
     if (!verify_checksum(tmp.checksum_type, 
                         p, ENTRY_HEADER_SIZE - 4, header_checksum)) {
         LOG(ERROR) << "Found corrupted header at offset=" << offset
@@ -209,13 +213,13 @@ int Segment::_load_entry(off_t offset, EntryHeader* head, butil::IOBuf* data,
 
 int Segment::_get_meta(int64_t index, LogMeta* meta) const {
     BAIDU_SCOPED_LOCK(_mutex);
-    if (index > _max_index.load(butil::memory_order_relaxed) 
+    if (index > _last_index.load(butil::memory_order_relaxed) 
                     || index < _first_index) {
         // out of range
         BRAFT_VLOG << "_last_index=" << _last_index.load(butil::memory_order_relaxed)
                   << " _first_index=" << _first_index;
         return -1;
-    } else if (_max_index == _first_index - 1) {
+    } else if (_last_index == _first_index - 1) {
         BRAFT_VLOG << "_last_index=" << _last_index.load(butil::memory_order_relaxed)
                   << " _first_index=" << _first_index;
         // empty
@@ -223,14 +227,14 @@ int Segment::_get_meta(int64_t index, LogMeta* meta) const {
     }
     int64_t meta_index = index - _first_index;
     // int64_t entry_cursor = _offset_and_term[meta_index].first;
-    if (_offset_and_term_array[meta_index] != NULL){
-        int64_t entry_cursor = (*_offset_and_term_array[meta_index]).first;
+    if (_offset_and_term_array[meta_index].first != -1){
+        int64_t entry_cursor = _offset_and_term_array[meta_index].first;
         // int64_t next_cursor = (index < _last_index.load(butil::memory_order_relaxed))
         //                       ? _offset_and_term[meta_index + 1].first : _bytes;
-        int64_t next_cursor = (*_end_offset_and_term_array[meta_index]).first;
+        int64_t next_cursor = _end_offset_and_term_array[meta_index].first;
         DCHECK_LT(entry_cursor, next_cursor);
         meta->offset = entry_cursor;
-        meta->term = _offset_and_term[meta_index].second;
+        meta->term = _offset_and_term_array[meta_index].second;
         meta->length = next_cursor - entry_cursor;
         return 0;
     }
@@ -272,6 +276,10 @@ int Segment::load(ConfigurationManager* configuration_manager) {
     for (int64_t i = _first_index; entry_off < file_size; i++) {
         EntryHeader header;
         const int rc = _load_entry(entry_off, &header, NULL, ENTRY_HEADER_SIZE);
+        if (rc == -2){
+            // meets gaps or desperated but vaild entries
+            continue;
+        }
         if (rc > 0) {
             // The last log was not completely written, which should be truncated
             break;
@@ -307,11 +315,12 @@ int Segment::load(ConfigurationManager* configuration_manager) {
             }
         }
         // _offset_and_term.push_back(std::make_pair(entry_off, header.term));
-        *_offset_and_term_array[header.index - _first_index] = std::make_pair(entry_off, header.term);
-        ++actual_last_index;
+        _offset_and_term_array[header.index - _first_index] = std::make_pair(entry_off, header.term);
+        actual_last_index = std::max(header.index, actual_last_index);
         entry_off += skip_len;
-        *_end_offset_and_term_array[header.index - _first_index] = std::make_pair(entry_off, header.term);
+        _end_offset_and_term_array[header.index - _first_index] = std::make_pair(entry_off, header.term);
     }
+
 
     if (ret == 0 && !_is_open && actual_last_index < _last_index) {
         LOG(ERROR) << "data lost in a full segment, path: " << _path
@@ -343,13 +352,13 @@ int Segment::append(const LogEntry* entry) {
 
     if (BAIDU_UNLIKELY(!entry || !_is_open)) {
         return EINVAL;
-    } else if (entry->id.index != 
+    } /*else if (entry->id.index != 
                     _last_index.load(butil::memory_order_consume) + 1) {
         CHECK(false) << "entry->index=" << entry->id.index
                   << " _last_index=" << _last_index
                   << " _first_index=" << _first_index;
         return ERANGE;
-    }
+    }*/
 
     butil::IOBuf data;
     switch (entry->type) {
@@ -403,10 +412,11 @@ int Segment::append(const LogEntry* entry) {
     }
     BAIDU_SCOPED_LOCK(_mutex);
     // _offset_and_term.push_back(std::make_pair(_bytes, entry->id.term));
-    *_offset_and_term_array[entry->id.index - _first_index] = std::make_pair(_bytes, entry->id.term);
-    _last_index.fetch_add(1, butil::memory_order_relaxed);
+    _offset_and_term_array[entry->id.index - _first_index] = std::make_pair(_bytes, entry->id.term);
+    // _last_index.fetch_add(1, butil::memory_order_relaxed);
+    _last_index.store(std::max(_last_index.load(butil::memory_order_relaxed), entry->id.index));
     _bytes += to_write;
-    *_end_offset_and_term_array[entry->id.index - _first_index] = std::make_pair(_bytes, entry->id.term);
+    _end_offset_and_term_array[entry->id.index - _first_index] = std::make_pair(_bytes, entry->id.term);
 
     return 0;
 }
@@ -580,34 +590,53 @@ int Segment::unlink() {
     return ret;
 }
 
+/* New truncate is a logic function becasue entries are not sequential saved. */
 int Segment::truncate(const int64_t last_index_kept) {
-    int64_t truncate_size = 0;
+    // int64_t truncate_size = 0;
     int64_t first_truncate_in_offset = 0;
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
     if (last_index_kept >= _last_index) {
         return 0;
     }
-    first_truncate_in_offset = last_index_kept + 1 - _first_index;
-    truncate_size = _offset_and_term[first_truncate_in_offset].first;
-    BRAFT_VLOG << "Truncating " << _path << " first_index: " << _first_index
-              << " last_index from " << _last_index << " to " << last_index_kept
-              << " truncate size to " << truncate_size;
+    // first_truncate_in_offset = last_index_kept + 1 - _first_index;
+    // // truncate_size = _offset_and_term_array[first_truncate_in_offset].first;
+    // // BRAFT_VLOG << "Truncating " << _path << " first_index: " << _first_index
+    //           << " last_index from " << _last_index << " to " << last_index_kept
+    //           << " truncate size to " << truncate_size;
     lck.unlock();
 
-    // truncate fd
-    int ret = ftruncate_uninterrupted(_fd, truncate_size);
-    if (ret < 0) {
-        return ret;
+    // mark all the truncated entries invaild
+    for (int64_t i = last_index_kept + 1; i <= _last_index; i++){
+        // get all saved entries
+        if (_offset_and_term_array[i].first != -1){
+            // size of term
+            char header_buf[64];
+            RawPacker packer(header_buf);
+            // write -1 on term. Means it is a invaild entry
+            packer.pack64(-1);
+            butil::IOBuf header;
+            header.append(header_buf, 64);
+            file_pwrite(header, _fd, _offset_and_term_array[i].first);
+
+            _offset_and_term_array[i] = std::make_pair(_offset_and_term_array[i].first, -1);
+        }
     }
+
+    // truncate fd
+    // int ret = ftruncate_uninterrupted(_fd, truncate_size);
+    // if (ret < 0) {
+    //     return ret;
+    // }
 
     // seek fd
-    off_t ret_off = ::lseek(_fd, truncate_size, SEEK_SET);
-    if (ret_off < 0) {
-        PLOG(ERROR) << "Fail to lseek fd=" << _fd << " to size=" << truncate_size
-                    << " path: " << _path;
-        return -1;
-    }
+    // off_t ret_off = ::lseek(_fd, truncate_size, SEEK_SET);
+    // if (ret_off < 0) {
+    //     PLOG(ERROR) << "Fail to lseek fd=" << _fd << " to size=" << truncate_size
+    //                 << " path: " << _path;
+    //     return -1;
+    // }
 
+    int ret = 0;
     // rename
     if (!_is_open) {
         std::string old_path(_path);
@@ -626,9 +655,10 @@ int Segment::truncate(const int64_t last_index_kept) {
 
     lck.lock();
     // update memory var
-    _offset_and_term.resize(first_truncate_in_offset);
+    // _offset_and_term.resize(first_truncate_in_offset);
     _last_index.store(last_index_kept, butil::memory_order_relaxed);
-    _bytes = truncate_size;
+    // _last_index.store(std::min(_last_index.load(butil::memory_order_relaxed), last_index_kept), butil::memory_order_relaxed);
+    // _bytes = truncate_size;
     return ret;
 }
 
