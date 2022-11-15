@@ -32,10 +32,10 @@ public:
 
     LogEntry();
 
+    virtual ~LogEntry();
 private:
     DISALLOW_COPY_AND_ASSIGN(LogEntry);
     friend class butil::RefCountedThreadSafe<LogEntry>;
-    virtual ~LogEntry();
 };
 
 // Comparators

@@ -19,16 +19,16 @@ class BAIDU_CACHELINE_ALIGNMENT Segment
 public:
     Segment(const std::string& path, const int64_t first_index, int checksum_type)
         : _path(path), _bytes(0),
-        _fd(-1), _is_open(true),
-        _first_index(first_index), _last_index(first_index - 1),
-        _checksum_type(checksum_type), _offset_and_term_array(100000, std::make_pair(-1, -1)), _end_offset_and_term_array(100000, std::make_pair(-1, -1))
+        _fd(-1), _is_open(true), _pending_for_closing(false),
+        _first_index(first_index), _last_index(first_index - 1), _vaild_entries_counter(0),
+        _checksum_type(checksum_type), _offset_and_term_array(1000000, std::make_pair(-1, -1)), _end_offset_and_term_array(1000000, std::make_pair(-1, -1))
     {}
     Segment(const std::string& path, const int64_t first_index, const int64_t last_index,
             int checksum_type)
         : _path(path), _bytes(0),
-        _fd(-1), _is_open(false),
-        _first_index(first_index), _last_index(last_index),
-        _checksum_type(checksum_type), _offset_and_term_array(100000, std::make_pair(-1, -1)), _end_offset_and_term_array(100000, std::make_pair(-1, -1))
+        _fd(-1), _is_open(false), _pending_for_closing(false),
+        _first_index(first_index), _last_index(last_index), _vaild_entries_counter(0),
+        _checksum_type(checksum_type), _offset_and_term_array(1000000, std::make_pair(-1, -1)), _end_offset_and_term_array(1000000, std::make_pair(-1, -1))
     {}
 
     struct EntryHeader;
@@ -63,6 +63,15 @@ public:
 
     bool is_open() const {
         return _is_open;
+    }
+
+    int prepare_to_close() {
+        _pending_for_closing = true;
+        return 0;
+    }
+
+    bool is_fullfilled() const {
+        return _last_index - _first_index + 1 - _vaild_entries_counter == 0;
     }
 
     int64_t bytes() const {
@@ -109,10 +118,12 @@ friend class butil::RefCountedThreadSafe<Segment>;
     mutable raft::raft_mutex_t _mutex;
     int _fd;
     bool _is_open;
+    bool _pending_for_closing;
     bool _sequential;
     const int64_t _first_index;
     butil::atomic<int64_t> _last_index;
     butil::atomic<int64_t> _max_index;
+    butil::atomic<int64_t> _vaild_entries_counter;
     int _checksum_type;
     // 这个vector必须是有序的
     std::vector<std::pair<int64_t/*offset*/, int64_t/*term*/> > _offset_and_term;

@@ -83,6 +83,7 @@ int Segment::create() {
 
     std::string path(_path);
     butil::string_appendf(&path, "/" BRAFT_SEGMENT_OPEN_PATTERN, _first_index);
+    std::cout << " create segment: "<< path << std::endl;
     _fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
     if (_fd >= 0) {
         butil::make_close_on_exec(_fd);
@@ -147,6 +148,7 @@ inline uint32_t get_checksum(int checksum_type, const butil::IOBuf& data) {
 int Segment::_load_entry(off_t offset, EntryHeader* head, butil::IOBuf* data,
                          size_t size_hint) const {
     butil::IOPortal buf;
+
     size_t to_read = std::max(size_hint, ENTRY_HEADER_SIZE);
     const ssize_t n = file_pread(&buf, _fd, offset, to_read);
     if (n != (ssize_t)to_read) {
@@ -174,7 +176,7 @@ int Segment::_load_entry(off_t offset, EntryHeader* head, butil::IOBuf* data,
     tmp.data_len = data_len;
     tmp.data_checksum = data_checksum;
     
-    if (tmp.term == -1){
+    if (tmp.term == 0){
         return -2;
     }
     if (!verify_checksum(tmp.checksum_type, 
@@ -415,8 +417,14 @@ int Segment::append(const LogEntry* entry) {
     _offset_and_term_array[entry->id.index - _first_index] = std::make_pair(_bytes, entry->id.term);
     // _last_index.fetch_add(1, butil::memory_order_relaxed);
     _last_index.store(std::max(_last_index.load(butil::memory_order_relaxed), entry->id.index));
+    _vaild_entries_counter.fetch_add(1, butil::memory_order_release);
     _bytes += to_write;
     _end_offset_and_term_array[entry->id.index - _first_index] = std::make_pair(_bytes, entry->id.term);
+
+    if (_pending_for_closing && is_fullfilled()){
+
+        return close();
+    }
 
     return 0;
 }
@@ -503,7 +511,7 @@ int64_t Segment::get_term(const int64_t index) const {
 
 int Segment::close(bool will_sync) {
     CHECK(_is_open);
-    
+    std::cout << " closing : last index = " << _last_index.load() << " first index = " << _first_index << " _vaild_entries_counter = " << _vaild_entries_counter.load();
     std::string old_path(_path);
     butil::string_appendf(&old_path, "/" BRAFT_SEGMENT_OPEN_PATTERN,
                          _first_index);
@@ -525,6 +533,7 @@ int Segment::close(bool will_sync) {
     }
     if (ret == 0) {
         _is_open = false;
+        _pending_for_closing = false;
         const int rc = ::rename(old_path.c_str(), new_path.c_str());
         LOG_IF(INFO, rc == 0) << "Renamed `" << old_path
                               << "' to `" << new_path <<'\'';
@@ -558,6 +567,7 @@ static void* run_unlink(void* arg) {
 
 int Segment::unlink() {
     int ret = 0;
+    std::cout << " closing : last index = " << _last_index.load() << " first index = " << _first_index << " _vaild_entries_counter = " << _vaild_entries_counter.load();
     do {
         std::string path(_path);
         if (_is_open) {
@@ -608,20 +618,20 @@ int Segment::truncate(const int64_t last_index_kept) {
     // mark all the truncated entries invaild
     for (int64_t i = last_index_kept + 1; i <= _last_index; i++){
         // get all saved entries
-        if (_offset_and_term_array[i].first != -1){
+        if (_offset_and_term_array[i - _first_index].second != 0){
             // size of term
-            char header_buf[64];
+            char header_buf[8];
             RawPacker packer(header_buf);
             // write -1 on term. Means it is a invaild entry
-            packer.pack64(-1);
+            packer.pack64(0);
             butil::IOBuf header;
-            header.append(header_buf, 64);
-            file_pwrite(header, _fd, _offset_and_term_array[i].first);
+            header.append(header_buf, 8);
+            file_pwrite(header, _fd, _offset_and_term_array[i - _first_index].first);
 
-            _offset_and_term_array[i] = std::make_pair(_offset_and_term_array[i].first, -1);
+            _vaild_entries_counter.fetch_sub(1, butil::memory_order_release);
+            _offset_and_term_array[i - _first_index] = std::make_pair(_offset_and_term_array[i - _first_index].first, -1);
         }
     }
-
     // truncate fd
     // int ret = ftruncate_uninterrupted(_fd, truncate_size);
     // if (ret < 0) {
@@ -644,13 +654,14 @@ int Segment::truncate(const int64_t last_index_kept) {
                              _first_index, _last_index.load());
 
         std::string new_path(_path);
-        butil::string_appendf(&new_path, "/" BRAFT_SEGMENT_CLOSED_PATTERN,
-                             _first_index, last_index_kept);
+        butil::string_appendf(&new_path, "/" BRAFT_SEGMENT_OPEN_PATTERN,
+                             _first_index);
         ret = ::rename(old_path.c_str(), new_path.c_str());
         LOG_IF(INFO, ret == 0) << "Renamed `" << old_path << "' to `"
                                << new_path << '\'';
         LOG_IF(ERROR, ret != 0) << "Fail to rename `" << old_path << "' to `"
                                 << new_path << "', " << berror();
+        _is_open = true;
     }
 
     lck.lock();
@@ -736,11 +747,13 @@ int SegmentLogStorage::append_entries(const std::vector<LogEntry*>& entries) {
         if (NULL == segment) {
             return i;
         }
+        if (entry->id.index < segment->first_index()){
+            get_segment(entry->id.index, &segment);
+        }
         int ret = segment->append(entry);
         if (0 != ret) {
             return i;
         }
-        // _last_log_index.fetch_add(1, butil::memory_order_release);
         _last_log_index.store(std::max(_last_log_index.load(), entry->id.index), butil::memory_order_release);
         last_segment = segment;
     }
@@ -1154,11 +1167,16 @@ scoped_refptr<Segment> SegmentLogStorage::open_segment() {
         if (_open_segment->bytes() > FLAGS_raft_max_segment_size) {
             _segments[_open_segment->first_index()] = _open_segment;
             prev_open_segment.swap(_open_segment);
+            prev_open_segment->prepare_to_close();
         }
     }
     do {
         if (prev_open_segment) {
-            if (prev_open_segment->close(_enable_sync) == 0) {
+            int ret = 0;
+            if (prev_open_segment->is_fullfilled()) {
+                ret = prev_open_segment->close(_enable_sync);
+            }
+            if (ret == 0) {
                 BAIDU_SCOPED_LOCK(_mutex);
                 _open_segment = new Segment(_path, last_log_index() + 1, _checksum_type);
                 if (_open_segment->create() == 0) {
