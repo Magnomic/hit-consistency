@@ -87,7 +87,7 @@ public:
     BRAFT_MOCK ~FSMCaller();
     int init(const FSMCallerOptions& options);
     int shutdown();
-    BRAFT_MOCK int on_committed(int64_t committed_index, std::deque<int64_t> _oo_committed_entries);
+    BRAFT_MOCK int on_committed(int64_t committed_index, std::deque<int64_t> oo_committed_entries);
     int on_leader_stop(const butil::Status& status);
     int on_leader_start(int64_t term);
     int on_start_following(const LeaderChangeContext& start_following_context);
@@ -117,12 +117,13 @@ friend class IteratorImpl;
 
     struct ApplyTask {
         TaskType type;
+        // For oo log entry (if has)
+
+        std::deque<int64_t> oo_committed_entries;
         union {
             // For applying log entry (including configuartion change)
             int64_t committed_index;
             
-            // For oo log entry (if has)
-            std::deque<int64_t> *oo_committed_entries;
 
             // For on_leader_start
             int64_t term;

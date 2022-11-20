@@ -68,7 +68,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 endif()
 
 set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DGFLAGS_NS=${GFLAGS_NS}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CPP_FLAGS} -DNDEBUG -O2 -D__const__=__unused__ -pipe -W -Wall -Wno-unused-parameter -fPIC -fno-omit-frame-pointer")
+set(CMAKE_CXX_FLAGS "${CMAKE_CPP_FLAGS} -DNDEBUG -O0 -D__const__=__unused__ -pipe -W -Wall -Wno-unused-parameter -fPIC -fno-omit-frame-pointer")
 
 if(CMAKE_VERSION VERSION_LESS "3.1.3")
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -139,14 +139,34 @@ enable_testing()
 add_subdirectory(third_party/googletest-release-1.10.0)
 include_directories(third_party/googletest-release-1.10.0/googletest/include)
 
+find_path(GTEST_HEADER NAMES gtest/gtest.h)
+find_library(GTEST_LIB NAMES gtest)
+find_library(GTEST_MAIN_LIB NAMES gtest_main)
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUNIT_TEST")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUNIT_TEST")
+
 set(GTEST_LIB gtest gtest_main)
 
-add_executable(test_main test/tests_main.cc ${PROTO_SRC} ${PROTO_HEADER} ${SOURCES})
-target_link_libraries(test_main gtest gtest_main ${BRPC_LIB} ${DYNAMIC_LIB})
+file(GLOB TEST_BRAFT_SRCS "test/test_*.cc")
+foreach(BRAFT_UT ${TEST_BRAFT_SRCS})
+    get_filename_component(BRAFT_UT_WE ${BRAFT_UT} NAME_WE)
+    add_executable(${BRAFT_UT_WE} ${BRAFT_UT} 
+                    ${PROTO_SRC} ${PROTO_HEADER} ${SOURCES})
+    target_link_libraries(${BRAFT_UT_WE} ${GTEST_LIB}
+        #"-Xlinker \"-(\""
+                          ${BRPC_LIB} ${DYNAMIC_LIB}
+                          #                  "-Xlinker \"-)\""
+                          )
+    add_test(NAME ${BRAFT_UT_WE} COMMAND ${BRAFT_UT_WE})                      
+endforeach()
 
-add_test(NAME test_main COMMAND test_main)
+# add_executable(test_main test/tests_main.cc ${PROTO_SRC} ${PROTO_HEADER} ${SOURCES})
+# target_link_libraries(test_main gtest gtest_main ${BRPC_LIB} ${DYNAMIC_LIB})
 
-add_executable(test_log test/test_log.cc ${PROTO_SRC} ${PROTO_HEADER} ${SOURCES})
-target_link_libraries(test_log gtest gtest_main ${BRPC_LIB} ${DYNAMIC_LIB})
+# add_test(NAME test_main COMMAND test_main)
 
-add_test(NAME test_log COMMAND test_log)
+# add_executable(test_log test/test_log.cc ${PROTO_SRC} ${PROTO_HEADER} ${SOURCES})
+# target_link_libraries(test_log gtest gtest_main ${BRPC_LIB} ${DYNAMIC_LIB})
+
+# add_test(NAME test_log COMMAND test_log)

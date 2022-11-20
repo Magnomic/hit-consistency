@@ -64,7 +64,7 @@ public:
 
     // Notify the log manager about the latest snapshot, which indicates the
     // logs which can be safely truncated.
-    BRAFT_MOCK void set_snapshot(const SnapshotMeta* meta);
+    // BRAFT_MOCK void set_snapshot(const SnapshotMeta* meta);
 
     // Get the log at |index|
     // Returns:

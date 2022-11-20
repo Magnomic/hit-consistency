@@ -22,8 +22,12 @@ public:
 };
 
 int main(int argc, char* argv[]) {
-    ::testing::AddGlobalTestEnvironment(new TestEnvironment());
-    ::testing::InitGoogleTest(&argc, argv);
-    gflags::ParseCommandLineFlags(&argc, &argv, true);
-    return RUN_ALL_TESTS();
+    std::vector<int64_t> entries = {1 ,2 ,3 ,4 ,5};
+    std::cout << " entries->begin() : " << *entries.begin() << std::endl;
+    std::cout << " entries->end() : " << *(entries.end()-1) << std::endl;
+    entries.erase(entries.begin(), entries.end());
+    std::cout<< entries.size() << std::endl;
+    for (int64_t i =0;i<5;++i){
+        std::cout<< i << std::endl;
+    }
 }

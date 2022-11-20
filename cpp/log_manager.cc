@@ -291,6 +291,8 @@ void LogManager::unsafe_truncate_suffix(const int64_t last_index_kept) {
 int LogManager::check_and_resolve_conflict(
             std::vector<LogEntry*> *entries, StableClosure* done, bool ooRep) {
     AsyncClosureGuard done_guard(done);   
+    // std::cout << " entries->begin() : " << *entries->begin() << std::endl;
+    // std::cout << " entries->end() : " << *entries->end() << std::endl;
     if (entries->front()->id.index == 0) {
         // Node is currently the leader and |entries| are from the user who 
         // don't know the correct indexes the logs should assign to. So we have
@@ -321,11 +323,16 @@ int LogManager::check_and_resolve_conflict(
                          << ", return immediately with nothing changed";
             return 1;
         }
-
+        std::cout << " entries->size() : " << entries->size() << std::endl;
         if (entries->front()->id.index == _last_log_index + 1) {
             // Fast path
             _last_log_index = entries->back()->id.index;
         } else {
+            if (entries->back()->id.index > _max_log_index){
+                _max_log_index = entries->back()->id.index;
+                done_guard.release();
+                return 0;
+            }
             // Appending entries overlap the local ones. We should find if there
             // is a conflicting index from which we should truncate the local
             // ones.
@@ -359,10 +366,18 @@ int LogManager::check_and_resolve_conflict(
             for (size_t i = 0; i < conflicting_index; ++i) {
                 (*entries)[i]->Release();
             }
+            // std::cout << " entries->size() : " << entries->size() << std::endl;
+            // std::cout << " entries->begin() : " << *entries->begin() << std::endl;
+            // std::cout << " entries->end() : " << *(entries->end() - 1)  << std::endl;
+            // std::cout << " conflicting_index : " << conflicting_index << std::endl;
+            
             entries->erase(entries->begin(), 
-                           entries->begin() + conflicting_index);
+                        entries->begin() + conflicting_index);
+
         }
-        _max_log_index = std::max(_max_log_index, entries->back()->id.index);
+        if (!entries->empty()){
+            _max_log_index = std::max(_max_log_index, entries->back()->id.index);
+        }
         done_guard.release();
         return 0;
     }
@@ -383,7 +398,7 @@ void LogManager::append_entries(
         return run_closure_in_bthread(done);
     }
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
-    if (!entries->empty() && check_and_resolve_conflict(entries, done) != 0) {
+    if (!entries->empty() && check_and_resolve_conflict(entries, done, ooRep) != 0) {
         lck.unlock();
         // release entries
         for (size_t i = 0; i < entries->size(); ++i) {
@@ -406,29 +421,33 @@ void LogManager::append_entries(
         done->_first_log_index = entries->front()->id.index;
         /* Find the position to insert, we need to change the _last_log_index if it connects the _last_log_index and first ooEntry */
         std::deque<LogEntry*>::iterator it = _logs_in_memory.begin();
-        for (; it != _logs_in_memory.end(); ++it){
+        for (; it != _logs_in_memory.end();){
             if ((*it)->id.index > entries->front()->id.index){
                 break;
             }
+            ++it;
         }
         std::vector<LogEntry*>::iterator it_entry = entries->begin();
-        while (it_entry != entries->end() && it+1 != _logs_in_memory.end()){
-            if ((*it_entry)->id.index != (*it+1)->id.index){
+        while (it_entry != entries->end() && it != _logs_in_memory.end()){
+            if ((*it_entry)->id.index != (*it)->id.index){
                 /* Earse overlapping entries */
                 _logs_in_memory.insert(it, *it_entry++);
             } else {
                 /* Connect sequential entries */
                 (*it_entry)->Release();
                 entries->erase(it_entry);
+                /* Note that |entries| is sequential, so if we operate |it|++, *it->id.index must be greater or equal to *it_entry++->id.index */
                 it++;
             }
         }
         while (it_entry != entries->end()){
             _logs_in_memory.push_back(*it_entry++);
         }
-        while (it+1 != _logs_in_memory.end() && (*it++)->id.index == _last_log_index + 1){
+        while (it != _logs_in_memory.end() && (*it)->id.index == _last_log_index + 1){
             _last_log_index++;
+            it++;
         }
+        _max_log_index = std::max(entries->back()->id.index, _max_log_index);
     }
 
     done->_entries.swap(*entries);
@@ -755,6 +774,7 @@ LogManager::WaitId LogManager::wait(
     wm->on_new_log = on_new_log;
     wm->arg = arg;
     wm->error_code = 0;
+    LOG(INFO) << " Wait until " << expected_last_log_index << " comes";
     return notify_on_new_log(expected_last_log_index, wm);
 }
 
@@ -796,6 +816,7 @@ int LogManager::remove_waiter(WaitId id) {
 }
 
 void LogManager::wakeup_all_waiter(std::unique_lock<raft::raft_mutex_t>& lck) {
+    LOG(INFO) << "wake up waiters";
     if (_wait_map.empty()) {
         return;
     }
@@ -815,7 +836,7 @@ void LogManager::wakeup_all_waiter(std::unique_lock<raft::raft_mutex_t>& lck) {
         if (bthread_start_background(
                     &tid, &attr,
                     run_on_new_log, wm[i]) != 0) {
-            PLOG(ERROR) << "Fail to start bthread";
+            LOG(ERROR) << "Fail to start bthread";
             run_on_new_log(wm[i]);
         }
     }

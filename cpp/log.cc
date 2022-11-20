@@ -33,6 +33,10 @@ DEFINE_int32(raft_max_segment_size, 8 * 1024 * 1024 /*8M*/,
              "Max size of one segment file");
 BRPC_VALIDATE_GFLAG(raft_max_segment_size, brpc::PositiveInteger);
 
+DEFINE_int32(raft_max_segment_index_size, 1024 * 1024 /*8M*/, 
+             "Max size of one segment file");
+BRPC_VALIDATE_GFLAG(raft_max_segment_index_size, brpc::PositiveInteger);
+
 DEFINE_bool(raft_sync_segments, false, "call fsync when a segment is closed");
 BRPC_VALIDATE_GFLAG(raft_sync_segments, ::brpc::PassValidate);
 
@@ -218,10 +222,15 @@ int Segment::_get_meta(int64_t index, LogMeta* meta) const {
     if (index > _last_index.load(butil::memory_order_relaxed) 
                     || index < _first_index) {
         // out of range
+
+        std::cout << "_last_index=" << _last_index.load(butil::memory_order_relaxed)
+                  << " _first_index=" << _first_index << std::endl;
         BRAFT_VLOG << "_last_index=" << _last_index.load(butil::memory_order_relaxed)
                   << " _first_index=" << _first_index;
         return -1;
     } else if (_last_index == _first_index - 1) {
+        std::cout << "_last_index=" << _last_index.load(butil::memory_order_relaxed)
+                  << " _first_index=" << _first_index << std::endl;
         BRAFT_VLOG << "_last_index=" << _last_index.load(butil::memory_order_relaxed)
                   << " _first_index=" << _first_index;
         // empty
@@ -229,7 +238,7 @@ int Segment::_get_meta(int64_t index, LogMeta* meta) const {
     }
     int64_t meta_index = index - _first_index;
     // int64_t entry_cursor = _offset_and_term[meta_index].first;
-    if (_offset_and_term_array[meta_index].first != -1){
+    if (_offset_and_term_array[meta_index].second != 0){
         int64_t entry_cursor = _offset_and_term_array[meta_index].first;
         // int64_t next_cursor = (index < _last_index.load(butil::memory_order_relaxed))
         //                       ? _offset_and_term[meta_index + 1].first : _bytes;
@@ -240,6 +249,8 @@ int Segment::_get_meta(int64_t index, LogMeta* meta) const {
         meta->length = next_cursor - entry_cursor;
         return 0;
     }
+    
+    // std::cout << "_offset_and_term_array[meta_index]=" << _offset_and_term_array[meta_index].first << ", " << _offset_and_term_array[meta_index].second << " last index = " << _last_index.load(butil::memory_order_relaxed) << std::endl;
     // empty
     return -1;
 }
@@ -629,7 +640,7 @@ int Segment::truncate(const int64_t last_index_kept) {
             file_pwrite(header, _fd, _offset_and_term_array[i - _first_index].first);
 
             _vaild_entries_counter.fetch_sub(1, butil::memory_order_release);
-            _offset_and_term_array[i - _first_index] = std::make_pair(_offset_and_term_array[i - _first_index].first, -1);
+            _offset_and_term_array[i - _first_index] = std::make_pair(_offset_and_term_array[i - _first_index].first, 0);
         }
     }
     // truncate fd
@@ -1164,7 +1175,8 @@ scoped_refptr<Segment> SegmentLogStorage::open_segment() {
                 return NULL;
             }
         }
-        if (_open_segment->bytes() > FLAGS_raft_max_segment_size) {
+        if (_open_segment->bytes() > FLAGS_raft_max_segment_size || 
+                _open_segment->last_index() - _open_segment->first_index() > FLAGS_raft_max_segment_index_size) {
             _segments[_open_segment->first_index()] = _open_segment;
             prev_open_segment.swap(_open_segment);
             prev_open_segment->prepare_to_close();

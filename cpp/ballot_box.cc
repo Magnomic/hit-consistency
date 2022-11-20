@@ -50,9 +50,13 @@ int BallotBox::commit_at(std::deque<int64_t> commit_indexes, const PeerId& peer)
 
     /* TODO: _pending_queue still contain committed ooEntries. */
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
-    std::deque<int64_t> _oo_committed_entries;
+    std::deque<int64_t> oo_committed_entries;
     if (_pending_index == 0) {
         return EINVAL;
+    }
+    
+    if (commit_indexes.empty()) {
+        return 0;
     }
     /* We still use _pending_index to denote the first index of _pending_queue*/
     if (commit_indexes.back() < _pending_index) {
@@ -62,9 +66,12 @@ int BallotBox::commit_at(std::deque<int64_t> commit_indexes, const PeerId& peer)
         return ERANGE;
     }
 
-    int64_t last_committed_index = 0;
+    int64_t sequential_committed_index = 0;
     /* May not start from _pending_index when ooEntries option is enabled. */
     // const int64_t start_at = std::max(_pending_index, first_log_index);
+    while (*commit_indexes.begin() < _pending_index){
+        commit_indexes.pop_front();
+    }
     Ballot::PosHint pos_hint;
     for (std::deque<int64_t>::iterator it = commit_indexes.begin(); it != commit_indexes.end(); ++it) {
         Ballot& bl = _pending_meta_queue[*it - _pending_index];
@@ -72,11 +79,11 @@ int BallotBox::commit_at(std::deque<int64_t> commit_indexes, const PeerId& peer)
         /* So here we cannot directly set last_committed index to log_index, unless it start from _pending_index. */
         if (bl.granted()) {
             _committed_index_queue[*it - _pending_index] = true;
-            _oo_committed_entries.push_back(*it);
+            oo_committed_entries.push_back(*it);
         }
     }
 
-    if (last_committed_index == 0) {
+    if (oo_committed_entries.empty()) {
         return 0;
     }
 
@@ -87,24 +94,19 @@ int BallotBox::commit_at(std::deque<int64_t> commit_indexes, const PeerId& peer)
     // removal request, we think it's safe to commit all the uncommitted 
     // previous logs, which is not well proved right now
     // TODO: add vlog when committing previous logs
-    int64_t oo_start(0);
-    int64_t oo_end(0);
     if (commit_indexes.front() == _pending_index){
         while (_committed_index_queue.front()) {
             _pending_meta_queue.pop_front();
             _committed_index_queue.pop_front();
-            last_committed_index++;
+            sequential_committed_index++;
         }
     
-        _pending_index = last_committed_index + 1;
-        _last_committed_index.store(last_committed_index, butil::memory_order_relaxed);
-        while (_oo_committed_entries.front() <= last_committed_index){
-            _oo_committed_entries.pop_front();
-        }
+        _pending_index += sequential_committed_index;
+        _last_committed_index.store(_pending_index - 1, butil::memory_order_relaxed);
     }
     lck.unlock();
     // The order doesn't matter
-    _waiter->on_committed(last_committed_index, _oo_committed_entries);
+    _waiter->on_committed(_last_committed_index.load(), oo_committed_entries);
     return 0;
 }
 

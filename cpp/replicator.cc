@@ -363,7 +363,7 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
        << r->_options.peer_id << " prev_log_index " << request->prev_log_index()
        << " prev_log_term " << request->prev_log_term() << " count " << request->entries_size();
 
-    // LOG(INFO) << ss.str();
+    LOG(INFO) << ss.str();
 
     bool valid_rpc = false;
     int64_t rpc_first_index = request->prev_log_index() + 1;
@@ -374,13 +374,13 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
 
     for (std::deque<FlyingAppendEntriesRpc>::iterator rpc_it = r->_append_entries_in_fly.begin();
         rpc_it != r->_append_entries_in_fly.end(); ++rpc_it) {
-        ++status_it;
         if (rpc_it->log_index > rpc_first_index) {
             break;
         }
         if (rpc_it->call_id == cntl->call_id() && *status_it) {
             valid_rpc = true;
         }
+        ++status_it;
     }
     /* All are vaild here */
     if (!valid_rpc) {
@@ -642,13 +642,15 @@ void Replicator::_send_entries() {
     if (_flying_append_entries_size >= FLAGS_raft_max_entries_size ||
         _append_entries_in_fly.size() >= (size_t)FLAGS_raft_max_parallel_append_entries_rpc_num ||
         _st.st == BLOCKING) {
-        // LOG(INFO) << "node " << _options.group_id << ":" << _options.server_id
-        //     << " skip sending AppendEntriesRequest to " << _options.peer_id
-        //     << ", too many requests in flying, or the replicator is in block,"
-        //     << " next_index " << _next_index << " flying_size " << _flying_append_entries_size;
+        LOG(INFO) << "node " << _options.group_id << ":" << _options.server_id
+            << " skip sending AppendEntriesRequest to " << _options.peer_id
+            << ", too many requests in flying, or the replicator is in block,"
+            << " next_index " << _next_index << " flying_size " << _flying_append_entries_size;
         CHECK_EQ(0, bthread_id_unlock(_id)) << "Fail to unlock " << _id;
         return;
     }
+
+    std::cout << "prepare to _send_entries" << std::endl;
 
     std::unique_ptr<brpc::Controller> cntl(new brpc::Controller);
     std::unique_ptr<AppendEntriesRequest> request(new AppendEntriesRequest);
@@ -689,12 +691,12 @@ void Replicator::_send_entries() {
     
     g_send_entries_batch_counter << request->entries_size();
 
-    // LOG(INFO) << "node " << _options.group_id << ":" << _options.server_id
-    //     << " send AppendEntriesRequest to " << _options.peer_id << " term " << _options.term
-    //     << " last_committed_index " << request->committed_index()
-    //     << " prev_log_index " << request->prev_log_index()
-    //     << " prev_log_term " << request->prev_log_term()
-    //     << " next_index " << _next_index << " count " << request->entries_size();
+    LOG(INFO) << "node " << _options.group_id << ":" << _options.server_id
+        << " send AppendEntriesRequest to " << _options.peer_id << " term " << _options.term
+        << " last_committed_index " << request->committed_index()
+        << " prev_log_index " << request->prev_log_index()
+        << " prev_log_term " << request->prev_log_term()
+        << " next_index " << _next_index << " count " << request->entries_size();
     _st.st = APPENDING_ENTRIES;
     _st.first_log_index = _min_flying_index();
     _st.last_log_index = _next_index - 1;

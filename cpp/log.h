@@ -86,10 +86,6 @@ public:
         return _last_index.load(butil::memory_order_consume);
     }
 
-    int64_t max_index() const {
-        return _max_index.load(butil::memory_order_consume);
-    }
-
     std::string file_name();
 private:
 friend class butil::RefCountedThreadSafe<Segment>;
@@ -122,7 +118,6 @@ friend class butil::RefCountedThreadSafe<Segment>;
     bool _sequential;
     const int64_t _first_index;
     butil::atomic<int64_t> _last_index;
-    butil::atomic<int64_t> _max_index;
     butil::atomic<int64_t> _vaild_entries_counter;
     int _checksum_type;
     // 这个vector必须是有序的
