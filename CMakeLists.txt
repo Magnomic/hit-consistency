@@ -68,7 +68,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 endif()
 
 set(CMAKE_CPP_FLAGS "${DEFINE_CLOCK_GETTIME} -DGFLAGS_NS=${GFLAGS_NS}")
-set(CMAKE_CXX_FLAGS "${CMAKE_CPP_FLAGS} -DNDEBUG -O0 -D__const__=__unused__ -pipe -W -Wall -Wno-unused-parameter -fPIC -fno-omit-frame-pointer")
+set(CMAKE_CXX_FLAGS "${CMAKE_CPP_FLAGS} -DNDEBUG -O2 -D__const__=__unused__ -pipe -W -Wall -Wno-unused-parameter -fPIC -fno-omit-frame-pointer")
 
 if(CMAKE_VERSION VERSION_LESS "3.1.3")
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -143,8 +143,8 @@ find_path(GTEST_HEADER NAMES gtest/gtest.h)
 find_library(GTEST_LIB NAMES gtest)
 find_library(GTEST_MAIN_LIB NAMES gtest_main)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUNIT_TEST")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUNIT_TEST")
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUNIT_TEST")
+# set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUNIT_TEST")
 
 set(GTEST_LIB gtest gtest_main)
 

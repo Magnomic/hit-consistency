@@ -15,7 +15,7 @@
 #include <gflags/gflags.h>
 
 
-DEFINE_string(conf, "0.0.0.0:8000:0,0.0.0.0:8001:0", "Initial configuration of the replication group");
+DEFINE_string(conf, "0.0.0.0:8000:0,0.0.0.0:8001:0,0.0.0.0:8002:0", "Initial configuration of the replication group");
 DEFINE_int32(election_timeout_ms, 5000, 
             "Start election in such milliseconds if disconnect with the leader");
 DEFINE_bool(echo_attachment, true, "Echo attachment as well");
@@ -182,6 +182,7 @@ public:
         // A batch of tasks are committed, which must be processed through 
         // |iter|
         for (; iter.valid(); iter.next()) {
+            // LOG(INFO) << "Applying for " << iter.index();
             StateMachineResponse* response = NULL;
             // This guard helps invoke iter.done()->Run() asynchronously to
             // avoid that callback blocks the StateMachine
@@ -194,6 +195,7 @@ public:
                 StateMachineClosure* c = dynamic_cast<StateMachineClosure*>(iter.done());
                 offset = c->request()->offset();
                 data.swap(*(c->data()));
+                // LOG(INFO)<<*(c->data());
                 response = c->response();
             } else {
                 // Have to parse BlockRequest from this log.
@@ -229,6 +231,7 @@ public:
             }
 
             if (response) {
+                // LOG(INFO) << "response success";
                 response->set_success(true);
             }
         }

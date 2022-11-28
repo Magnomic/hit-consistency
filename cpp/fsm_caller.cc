@@ -44,13 +44,13 @@ int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
     int64_t counter = 0;
     for (; iter; ++iter) {
         if (iter->type == COMMITTED) {
-            LOG(INFO) << "Commit at " << iter->committed_index;
             if (iter->committed_index > max_committed_index) {
                 max_committed_index = iter->committed_index;
                 counter++;
             }
             while (!iter->oo_committed_entries.empty()){
                 oo_committed_entries.push_back(iter->oo_committed_entries.front());
+                // LOG(INFO) << "Max Commit at " << iter->oo_committed_entries.front();
                 iter->oo_committed_entries.pop_front();
             }
         } else {
@@ -94,6 +94,7 @@ int FSMCaller::run(void* meta, bthread::TaskIterator<ApplyTask>& iter) {
         }
     }
     if (max_committed_index >= 0) {
+        // LOG(INFO) << "Sequential Commit at " << max_committed_index;
         caller->_cur_task = COMMITTED;
         caller->do_committed(max_committed_index, oo_committed_entries);
         g_commit_tasks_batch_counter << counter;
@@ -234,21 +235,21 @@ void FSMCaller::do_committed(int64_t committed_index, std::deque<int64_t> _oo_co
     int64_t last_applied_index = _last_applied_index.load(
                                         butil::memory_order_relaxed);
 
-    int64_t end_committed_index = _oo_committed_entries.size() != 0 ? _oo_committed_entries.back() : committed_index;
+    int64_t end_committed_index = committed_index;
 
-    // We can tolerate the disorder of committed_index
-    if (last_applied_index >= end_committed_index) {
+    // LOG(INFO) << "_last_applied_index is " << _last_applied_index;
+    // last_applied_index is sequential applied idx
+    if (last_applied_index >= end_committed_index && _oo_committed_entries.empty()) {
         return;
     }
     std::vector<Closure*> closure;
-    int64_t first_closure_index = 0;
+    std::deque<int64_t> out_indexes;
     /* If st_committed_index = _first_index in closure_queue, we pop them.*/
-    LOG(INFO) << "_last_applied_index is " << _last_applied_index;
     CHECK_EQ(0, _closure_queue->pop_closure_until(committed_index, _oo_committed_entries, &closure,
-                                                  &first_closure_index));
+                                                  &out_indexes));
 
-    IteratorImpl iter_impl(_fsm, _log_manager, &closure, first_closure_index,
-                 last_applied_index, end_committed_index, &_applying_index, &_oo_committed_entries);
+    IteratorImpl iter_impl(_fsm, _log_manager, &closure,
+                 last_applied_index, end_committed_index, &_applying_index, &out_indexes);
     for (; iter_impl.is_good();) {
         if (iter_impl.entry()->type != ENTRY_TYPE_DATA) {
             if (iter_impl.entry()->type == ENTRY_TYPE_CONFIGURATION) {
@@ -281,20 +282,24 @@ void FSMCaller::do_committed(int64_t committed_index, std::deque<int64_t> _oo_co
         set_error(iter_impl.error());
         iter_impl.run_the_rest_closure_with_error();
     }
-    const int64_t last_index = iter_impl.index() - 1;
-    const int64_t last_term = _log_manager->get_term(last_index);
-    LogId last_applied_id(last_index, last_term);
-    for (int64_t i = first_closure_index; i<last_index; i++){
-        if (i - _last_applied_index > _oo_apply_queue.size()){
+    last_applied_index = committed_index;
+    for (std::deque<int64_t>::iterator it = out_indexes.begin(); it != out_indexes.end(); it++){
+        if (*it - _last_applied_index > _oo_apply_queue.size()){
             _oo_apply_queue.push_back(false);
         } else {
-            _oo_apply_queue[i - _last_applied_index] = true;
+            _oo_apply_queue[*it - _last_applied_index] = true;
         }
     }
     while (_oo_apply_queue.front()){
         _oo_apply_queue.pop_front();
         last_applied_index++;
     }
+    
+    // LOG(INFO) << "last_applied_index is " << last_applied_index;
+    const int64_t last_index = last_applied_index;
+    const int64_t last_term = _log_manager->get_term(last_index);
+    LogId last_applied_id(last_index, last_term);
+
     _last_applied_index.store(last_applied_index, butil::memory_order_release);
     _last_applied_term = last_term;
     _log_manager->set_applied_id(last_applied_id);
@@ -418,7 +423,6 @@ void FSMCaller::join() {
 
 IteratorImpl::IteratorImpl(StateMachine* sm, LogManager* lm,
                           std::vector<Closure*> *closure, 
-                          int64_t first_closure_index,
                           int64_t last_applied_index, 
                           int64_t committed_index,
                           butil::atomic<int64_t>* applying_index,
@@ -426,10 +430,11 @@ IteratorImpl::IteratorImpl(StateMachine* sm, LogManager* lm,
         : _sm(sm)
         , _lm(lm)
         , _closure(closure)
-        , _first_closure_index(first_closure_index)
-        , _cur_index(last_applied_index)
         , _committed_index(committed_index)
+        , _last_applied_index(last_applied_index)
         , _cur_entry(NULL)
+        , _it(-1)
+        , _actural_index(0)
         , _applying_index(applying_index)
         , _index_list(index_list)
 { next(); }
@@ -439,29 +444,36 @@ void IteratorImpl::next() {
         _cur_entry->Release();
         _cur_entry = NULL;
     }
-    if (_cur_index <= _committed_index) {
-        ++_cur_index;
-        /* We use the indexes in _index_list. */
-        int64_t actual_index = (*_index_list)[_cur_index - _first_closure_index];
-        if (_cur_index <= _committed_index) {
-            _cur_entry = _lm->get_entry(actual_index);
-            if (_cur_entry == NULL) {
-                _error.set_type(ERROR_TYPE_LOG);
-                _error.status().set_error(-1,
-                        "Fail to get entry at index=%" PRId64
-                        " while committed_index=%" PRId64,
-                        actual_index, _committed_index);
-            }
-            _applying_index->store(actual_index, butil::memory_order_relaxed);
-        }
+    if (_closure->empty() && _last_applied_index < _committed_index){
+        _index_list->push_back(++_last_applied_index);
     }
+    if (++_it >= (int64_t)_index_list->size()){
+        _it = -1;
+        return;
+    }
+    _actural_index = (*_index_list)[_it];
+    // LOG(INFO) << "_actural_index = " << _actural_index << std::endl
+    //         << "_committed_index = " << _committed_index << std::endl
+    //         << "_index_list.size = " << _index_list->size() << std::endl
+    //         << "_closure.size = " << _closure->size();
+    //  _index_list->pop_front();
+    _cur_entry = _lm->get_entry(_actural_index);
+    if (_cur_entry == NULL) {
+        _error.set_type(ERROR_TYPE_LOG);
+        _error.status().set_error(-1,
+                "Fail to get entry at index=%" PRId64
+                " while committed_index=%" PRId64,
+                _actural_index, _committed_index);
+    }
+    _applying_index->store(_actural_index, butil::memory_order_relaxed);
 }
 
 Closure* IteratorImpl::done() const {
-    if (_cur_index < _first_closure_index) {
+    // LOG(INFO) << "pop " << _it << " th done" << (*_closure)[_it] ;
+    if (_closure->empty()){
         return NULL;
     }
-    return (*_closure)[_cur_index - _first_closure_index];
+    return (*_closure)[_it];
 }
 
 void IteratorImpl::set_error_and_rollback(
@@ -470,11 +482,11 @@ void IteratorImpl::set_error_and_rollback(
         CHECK(false) << "Invalid ntail=" << ntail;
         return;
     }
-    if (_cur_entry == NULL || _cur_entry->type != ENTRY_TYPE_DATA) {
-        _cur_index -= ntail;
-    } else {
-        _cur_index -= (ntail - 1);
-    }
+    // if (_cur_entry == NULL || _cur_entry->type != ENTRY_TYPE_DATA) {
+    //     _cur_index -= ntail;
+    // } else {
+    //     _cur_index -= (ntail - 1);
+    // }
     if (_cur_entry) {
         _cur_entry->Release();
         _cur_entry = NULL;
@@ -482,14 +494,14 @@ void IteratorImpl::set_error_and_rollback(
     _error.set_type(ERROR_TYPE_STATE_MACHINE);
     _error.status().set_error(ESTATEMACHINE, 
             "StateMachine meet critical error when applying one "
-            " or more tasks since index=%" PRId64 ", %s", _cur_index,
+            " or more tasks since index=%" PRId64 ", %s", _it,
             (st ? st->error_cstr() : "none"));
 }
 
 void IteratorImpl::run_the_rest_closure_with_error() {
-    for (int64_t i = std::max(_cur_index, _first_closure_index);
-            i <= _committed_index; ++i) {
-        Closure* done = (*_closure)[i - _first_closure_index];
+    for (int64_t i = _it;
+            i <= _index_list->size(); ++i) {
+        Closure* done = (*_closure)[i];
         if (done) {
             done->status() = _error.status();
             run_closure_in_bthread(done);

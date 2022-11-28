@@ -45,40 +45,58 @@ void ClosureQueue::append_pending_closure(Closure* c) {
 }
 
 int ClosureQueue::pop_closure_until(int64_t to_index, std::deque<int64_t> _oo_committed_entries, 
-                                    std::vector<Closure*> *out, int64_t *out_first_index) {
+                                    std::vector<Closure*> *out, std::deque<int64_t> *out_indexes) {
     out->clear();
     BAIDU_SCOPED_LOCK(_mutex);
     if (_queue.empty() || !_oo_committed_entries.empty() && _oo_committed_entries.back() < _first_index) {
-        *out_first_index = _oo_committed_entries.back() + 1;
+        *out_indexes = _oo_committed_entries;
         return 0;
     }
+    // LOG(INFO) << " _first_index=" << _first_index
+    //             << " to_index=" << to_index
+    //             << " _closure_queue_size=" << _queue.size();
+    // if (!_oo_committed_entries.empty()){
+    //     LOG(INFO)   << " _oo_committed_entries.size=" << _oo_committed_entries.size();
+    //     LOG(INFO)   << " _oo_committed_entries first index=" << _oo_committed_entries.front();
+    //  }
     if (!_oo_committed_entries.empty() && _oo_committed_entries.back() > _first_index + (int64_t)_queue.size() - 1) {
         CHECK(false) << "Invalid index=" << to_index
                      << " _first_index=" << _first_index
                      << " _closure_queue_size=" << _queue.size();
         return -1;
     }
-    *out_first_index = _first_index <= to_index ? _first_index : _oo_committed_entries.front();
-    std::deque<Closure*>::iterator it_clo(_queue.begin());
-    std::deque<bool>::iterator it_com(_has_committed_queue.begin());
+    int64_t ite = _first_index;
+    int64_t queue_index;
     /* If commit ooEntries*/
-    while (!_oo_committed_entries.empty() || _first_index <= to_index){
-        if (_first_index <= to_index){
-            out->push_back(_queue.front());
-            _queue.pop_front();
-            _has_committed_queue.pop_front();
-            _first_index++;
+    while (!_oo_committed_entries.empty() || ite <= to_index){
+        if (ite <= to_index){
+            // if (!_has_committed_queue[ite - _first_index]){
+            //     out->push_back(_queue[ite - _first_index]);
+            //     out_indexes->push_back(ite);
+            //     _has_committed_queue[ite - _first_index] = true;
+            // }
+            queue_index = ite - _first_index;
+            ite++;
         } else {
-            out->push_back(_queue[_oo_committed_entries.front() - _first_index]);
-            _has_committed_queue[_oo_committed_entries.front() - _first_index] = true;
+            queue_index = _oo_committed_entries.front() - _first_index;
+            // out->push_back(_queue[_oo_committed_entries.front() - _first_index]);
+            // out_indexes->push_back(_oo_committed_entries.front());
+            // _has_committed_queue[_oo_committed_entries.front() - _first_index] = true;
             _oo_committed_entries.pop_front();
         }
+        if (!_has_committed_queue[queue_index]){
+                out->push_back(_queue[queue_index]);
+                out_indexes->push_back(queue_index + _first_index);
+                _has_committed_queue[queue_index] = true;
+        }
     }
-    while (_has_committed_queue.front()){
+    while (!_has_committed_queue.empty() && _has_committed_queue.front()){
         _queue.pop_front();
         _has_committed_queue.pop_front();
         _first_index++;
     }
+    // LOG(INFO) << " _first_index=" << _first_index
+    //             << " _closure_queue_size=" << _queue.size();
     // for (int64_t i = *out_first_index; i <= to_index; ++i) {
     //     out->push_back(_queue.front());
     //     _queue.pop_front();

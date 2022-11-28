@@ -36,6 +36,7 @@ static void* sender(void* arg){
     }
     int count(0);
     for (;;count++){
+        // bthread_usleep(rand()%10);
         hit_consistency::StateMachineService_Stub stub(&channel);
         brpc::Controller cntl;
         cntl.set_timeout_ms(500);
@@ -44,7 +45,7 @@ static void* sender(void* arg){
         request.set_offset(butil::fast_rand_less_than(
                             FLAGS_block_size - FLAGS_request_size));
 
-        cntl.request_attachment().resize(FLAGS_request_size, 'a');
+        cntl.request_attachment().resize(FLAGS_request_size, (char) (rand() % 26 + 65));
         stub.write(&cntl, &request, &response, NULL);
 
         if (cntl.Failed()) {

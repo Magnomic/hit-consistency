@@ -21,14 +21,14 @@ public:
         : _path(path), _bytes(0),
         _fd(-1), _is_open(true), _pending_for_closing(false),
         _first_index(first_index), _last_index(first_index - 1), _vaild_entries_counter(0),
-        _checksum_type(checksum_type), _offset_and_term_array(1000000, std::make_pair(-1, -1)), _end_offset_and_term_array(1000000, std::make_pair(-1, -1))
+        _checksum_type(checksum_type), _offset_and_term_array(1000000, std::make_pair(-1, 0)), _end_offset_and_term_array(1000000, std::make_pair(-1, 0))
     {}
     Segment(const std::string& path, const int64_t first_index, const int64_t last_index,
             int checksum_type)
         : _path(path), _bytes(0),
         _fd(-1), _is_open(false), _pending_for_closing(false),
         _first_index(first_index), _last_index(last_index), _vaild_entries_counter(0),
-        _checksum_type(checksum_type), _offset_and_term_array(1000000, std::make_pair(-1, -1)), _end_offset_and_term_array(1000000, std::make_pair(-1, -1))
+        _checksum_type(checksum_type), _offset_and_term_array(1000000, std::make_pair(-1, 0)), _end_offset_and_term_array(1000000, std::make_pair(-1, 0))
     {}
 
     struct EntryHeader;

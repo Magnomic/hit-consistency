@@ -633,7 +633,7 @@ int Segment::truncate(const int64_t last_index_kept) {
             // size of term
             char header_buf[8];
             RawPacker packer(header_buf);
-            // write -1 on term. Means it is a invaild entry
+            // write 0 on term. Means it is a invaild entry
             packer.pack64(0);
             butil::IOBuf header;
             header.append(header_buf, 8);
@@ -765,7 +765,7 @@ int SegmentLogStorage::append_entries(const std::vector<LogEntry*>& entries) {
         if (0 != ret) {
             return i;
         }
-        _last_log_index.store(std::max(_last_log_index.load(), entry->id.index), butil::memory_order_release);
+        _last_log_index.store(std::max(_last_log_index.load(butil::memory_order_relaxed), entry->id.index), butil::memory_order_release);
         last_segment = segment;
     }
     last_segment->sync(_enable_sync);
@@ -785,7 +785,7 @@ int SegmentLogStorage::append_entry(const LogEntry* entry) {
         return EINVAL;
     }
     // _last_log_index.fetch_add(1, butil::memory_order_release);
-    _last_log_index.store(std::max(_last_log_index.load(), entry->id.index), butil::memory_order_release);
+    _last_log_index.store(std::max(_last_log_index.load(butil::memory_order_relaxed), entry->id.index), butil::memory_order_release);
 
     return segment->sync(_enable_sync);
 }
@@ -1216,9 +1216,9 @@ int SegmentLogStorage::get_segment(int64_t index, scoped_refptr<Segment>* ptr) {
         return -1;
     }
     if (index < first_index || index > last_index + 1) {
-        LOG_IF(WARNING, index > last_index) << "Attempted to access entry " << index << " outside of log, "
-            << " first_log_index: " << first_index
-            << " last_log_index: " << last_index;
+        // LOG_IF(WARNING, index > last_index) << "Attempted to access entry " << index << " outside of log, "
+        //     << " first_log_index: " << first_index
+        //     << " last_log_index: " << last_index;
         return -1;
     } else if (index == last_index + 1) {
         return -1;

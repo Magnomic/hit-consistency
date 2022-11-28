@@ -28,7 +28,7 @@ public:
     // out is not empyt, index + 1 otherwise.
     /* Commmit from from_index to to_index. Pop entries from front if they are sequential |true| in _has_committed_queue. */
     int pop_closure_until(int64_t to_index, std::deque<int64_t> _oo_apply_entries,
-                          std::vector<Closure*> *out, int64_t *out_first_index);
+                          std::vector<Closure*> *out, std::deque<int64_t> *out_indexes);
 private:
     // TODO: a spsc lock-free queue would help
     raft::raft_mutex_t                                    _mutex;

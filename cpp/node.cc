@@ -171,7 +171,14 @@ private:
                          // indexes are less than request->committed_index()
                         );
         //_ballot_box is thread safe and tolerats disorder.
-        _node->_ballot_box->set_last_committed_index(committed_index);
+        std::deque<int64_t> oo_entries;
+        for (int64_t i = 1; i <= _request->entries_size(); i++){
+            if (_request->committed_index() >= _request->prev_log_index() + i) {
+                continue;
+            }
+            oo_entries.push_back(_request->prev_log_index() + i);
+        }
+        _node->_ballot_box->set_last_committed_index(committed_index, oo_entries);
     }
 
     brpc::Controller* _cntl;
@@ -537,7 +544,7 @@ void NodeImpl::vote(std::unique_lock<raft::raft_mutex_t>* lck){
 
 void NodeImpl::handle_pre_vote_response(const PeerId& peer_id, const int64_t term, RequestVoteResponse response){
 
-    LOG(INFO) << "GOT RESPONSE";
+    // LOG(INFO) << "GOT RESPONSE";
 
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
 
@@ -801,22 +808,22 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
     }
     
     // trace the sequence of the entries and periodically output them
-    if (request->entries_size() > 0 && !from_append_entries_cache){
-        int64_t _t_index = request->prev_log_index();
-        for (int i = 0; i < request->entries_size(); i++) {
-            _t_index++;
-            _entries_index_sequence.push_back(_t_index);
-            if (_entries_index_sequence.size() > 100){
-                std::stringstream ss;
-                ss << "periodically output indexes ";
-                while (!_entries_index_sequence.empty()){
-                    ss << _entries_index_sequence.front() << ", ";
-                    _entries_index_sequence.pop_front();
-                }
-                LOG(INFO) << ss.str();
-            }
-        }
-    }
+    // if (request->entries_size() > 0 && !from_append_entries_cache){
+    //     int64_t _t_index = request->prev_log_index();
+    //     for (int i = 0; i < request->entries_size(); i++) {
+    //         _t_index++;
+    //         _entries_index_sequence.push_back(_t_index);
+    //         if (_entries_index_sequence.size() > 100){
+    //             std::stringstream ss;
+    //             ss << "periodically output indexes ";
+    //             while (!_entries_index_sequence.empty()){
+    //                 ss << _entries_index_sequence.front() << ", ";
+    //                 _entries_index_sequence.pop_front();
+    //             }
+    //             LOG(INFO) << ss.str();
+    //         }
+    //     }
+    // }
 
     const int64_t prev_log_index = request->prev_log_index();
     const int64_t prev_log_term = request->prev_log_term();
@@ -871,9 +878,10 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         lck.unlock();
         // see the comments at FollowerStableClosure::run()
         /* last sequential committed index */
+        std::deque<int64_t> _;
         _ballot_box->set_last_committed_index(
                 std::min(request->committed_index(),
-                         prev_log_index));
+                         prev_log_index), _);
         return;
     }
 
@@ -916,9 +924,9 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
     }
 
     // check out-of-order cache
-    // if (FLAGS_cache_enabled){
-    //     check_append_entries_cache(index);
-    // }
+    if (FLAGS_cache_enabled){
+        check_append_entries_cache(index);
+    }
 
     FollowerStableClosure* c = new FollowerStableClosure(
             cntl, request, response, done_guard.release(),

@@ -323,7 +323,7 @@ int LogManager::check_and_resolve_conflict(
                          << ", return immediately with nothing changed";
             return 1;
         }
-        std::cout << " entries->size() : " << entries->size() << std::endl;
+        // std::cout << " entries->size() : " << entries->size() << std::endl;
         if (entries->front()->id.index == _last_log_index + 1) {
             // Fast path
             _last_log_index = entries->back()->id.index;
@@ -343,6 +343,7 @@ int LogManager::check_and_resolve_conflict(
                 if ((!ooRep && target_term != (*entries)[conflicting_index]->id.term) || 
                     (ooRep && target_term != 0 /* Target_term can be 0 because we accept ooRep */
                            && target_term != (*entries)[conflicting_index]->id.term) /* If target_term != 0 and target_term is different from received entry, we still need to truncate them because we received entries from a leader with a newer term*/) {
+                    LOG(INFO) << "target_term is " << target_term << " and (*entries)[conflicting_index]->id.term is " << (*entries)[conflicting_index]->id.term;
                     break;
                 }
             }
@@ -363,16 +364,18 @@ int LogManager::check_and_resolve_conflict(
             // Release all the entries before the conflicting_index and the rest
             // would be append to _logs_in_memory and _log_storage after this
             // function returns
-            for (size_t i = 0; i < conflicting_index; ++i) {
-                (*entries)[i]->Release();
+            if (!ooRep || conflicting_index != entries->size()){
+                for (size_t i = 0; i < conflicting_index; ++i) {
+                    (*entries)[i]->Release();
+                }
+                // std::cout << " entries->size() : " << entries->size() << std::endl;
+                // std::cout << " entries->begin() : " << *entries->begin() << std::endl;
+                // std::cout << " entries->end() : " << *(entries->end() - 1)  << std::endl;
+                // std::cout << " conflicting_index : " << conflicting_index << std::endl;
+                
+                entries->erase(entries->begin(), 
+                            entries->begin() + conflicting_index);
             }
-            // std::cout << " entries->size() : " << entries->size() << std::endl;
-            // std::cout << " entries->begin() : " << *entries->begin() << std::endl;
-            // std::cout << " entries->end() : " << *(entries->end() - 1)  << std::endl;
-            // std::cout << " conflicting_index : " << conflicting_index << std::endl;
-            
-            entries->erase(entries->begin(), 
-                        entries->begin() + conflicting_index);
 
         }
         if (!entries->empty()){
@@ -422,7 +425,7 @@ void LogManager::append_entries(
         /* Find the position to insert, we need to change the _last_log_index if it connects the _last_log_index and first ooEntry */
         std::deque<LogEntry*>::iterator it = _logs_in_memory.begin();
         for (; it != _logs_in_memory.end();){
-            if ((*it)->id.index > entries->front()->id.index){
+            if ((*it)->id.index >= entries->front()->id.index){
                 break;
             }
             ++it;
@@ -774,13 +777,14 @@ LogManager::WaitId LogManager::wait(
     wm->on_new_log = on_new_log;
     wm->arg = arg;
     wm->error_code = 0;
-    LOG(INFO) << " Wait until " << expected_last_log_index << " comes";
+    // LOG(INFO) << " Wait until " << expected_last_log_index << " comes";
     return notify_on_new_log(expected_last_log_index, wm);
 }
 
 LogManager::WaitId LogManager::notify_on_new_log(
         int64_t expected_last_log_index, WaitMeta* wm) {
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
+    /* New log entries early come */
     if (expected_last_log_index != _last_log_index || _stopped) {
         wm->error_code = _stopped ? ESTOP : 0;
         lck.unlock();
@@ -816,7 +820,7 @@ int LogManager::remove_waiter(WaitId id) {
 }
 
 void LogManager::wakeup_all_waiter(std::unique_lock<raft::raft_mutex_t>& lck) {
-    LOG(INFO) << "wake up waiters";
+    // LOG(INFO) << "wake up waiters " << _wait_map.size();
     if (_wait_map.empty()) {
         return;
     }

@@ -50,7 +50,7 @@ public:
 
     // Called by follower, otherwise the behavior is undefined.
     // Set commited index received from leader
-    int set_last_committed_index(int64_t last_committed_index);
+    int set_last_committed_index(int64_t last_committed_index, std::deque<int64_t> oo_committed_entries);
 
     int64_t last_committed_index() 
     { return _last_committed_index.load(butil::memory_order_acquire); }

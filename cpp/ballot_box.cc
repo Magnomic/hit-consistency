@@ -54,7 +54,7 @@ int BallotBox::commit_at(std::deque<int64_t> commit_indexes, const PeerId& peer)
     if (_pending_index == 0) {
         return EINVAL;
     }
-    
+
     if (commit_indexes.empty()) {
         return 0;
     }
@@ -77,7 +77,8 @@ int BallotBox::commit_at(std::deque<int64_t> commit_indexes, const PeerId& peer)
         Ballot& bl = _pending_meta_queue[*it - _pending_index];
         pos_hint = bl.grant(peer, pos_hint);
         /* So here we cannot directly set last_committed index to log_index, unless it start from _pending_index. */
-        if (bl.granted()) {
+        if (bl.granted() && !_committed_index_queue[*it - _pending_index]) {
+            // LOG(INFO) << "Index granted " << *it;
             _committed_index_queue[*it - _pending_index] = true;
             oo_committed_entries.push_back(*it);
         }
@@ -95,7 +96,7 @@ int BallotBox::commit_at(std::deque<int64_t> commit_indexes, const PeerId& peer)
     // previous logs, which is not well proved right now
     // TODO: add vlog when committing previous logs
     if (commit_indexes.front() == _pending_index){
-        while (_committed_index_queue.front()) {
+        while (!_committed_index_queue.empty() && _committed_index_queue.front()) {
             _pending_meta_queue.pop_front();
             _committed_index_queue.pop_front();
             sequential_committed_index++;
@@ -124,8 +125,8 @@ int BallotBox::clear_pending_tasks() {
 int BallotBox::reset_pending_index(int64_t new_pending_index) {
     BAIDU_SCOPED_LOCK(_mutex);
 
-    LOG(INFO)  << "pending_index " << _pending_index << " pending_meta_queue " 
-        << _pending_meta_queue.size();
+    // LOG(INFO)  << "pending_index " << _pending_index << " pending_meta_queue " 
+        // << _pending_meta_queue.size();
     CHECK(_pending_index == 0 && _pending_meta_queue.empty())
         << "pending_index " << _pending_index << " pending_meta_queue " 
         << _pending_meta_queue.size();
@@ -136,7 +137,7 @@ int BallotBox::reset_pending_index(int64_t new_pending_index) {
     return 0;
 }
 
-int BallotBox::set_last_committed_index(int64_t last_committed_index) {
+int BallotBox::set_last_committed_index(int64_t last_committed_index, std::deque<int64_t> oo_committed_entries) {
     // FIXME: it seems that lock is not necessary here
     std::unique_lock<raft::raft_mutex_t> lck(_mutex);
     if (_pending_index != 0 || !_pending_meta_queue.empty()) {
@@ -152,6 +153,7 @@ int BallotBox::set_last_committed_index(int64_t last_committed_index) {
     if (last_committed_index > _last_committed_index.load(butil::memory_order_relaxed)) {
         _last_committed_index.store(last_committed_index, butil::memory_order_relaxed);
         lck.unlock();
+        _waiter->on_committed(last_committed_index, oo_committed_entries);
     }
     return 0;
 }

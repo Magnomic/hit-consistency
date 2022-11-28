@@ -74,7 +74,7 @@ Replicator::Replicator()
     , _install_snapshot_counter(0)
     , _readonly_index(0)
     , _wait_id(0)
-    , _oo_start_index(0)
+    , _oo_start_index(1)
     , _is_waiter_canceled(false)
     , _catchup_closure(NULL)
 {
@@ -336,8 +336,6 @@ void Replicator::_on_heartbeat_returned(
         CHECK_EQ(0, bthread_id_unlock(dummy_id)) << "Fail to unlock " << dummy_id;
         return;
     }
-    const PeerId peer_id = r->_options.peer_id;
-    int64_t term = r->_options.term;
     CHECK_EQ(0, bthread_id_unlock(dummy_id)) << "Fail to unlock " << dummy_id;
     node_impl->Release();
     return;
@@ -358,12 +356,12 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
     }
 
     std::stringstream ss;
-    ss << "node " << r->_options.group_id << ":" << r->_options.server_id 
-       << " received AppendEntriesResponse from "
-       << r->_options.peer_id << " prev_log_index " << request->prev_log_index()
-       << " prev_log_term " << request->prev_log_term() << " count " << request->entries_size();
+    // ss << "node " << r->_options.group_id << ":" << r->_options.server_id 
+    //    << " received AppendEntriesResponse from "
+    //    << r->_options.peer_id << " prev_log_index " << request->prev_log_index()
+    //    << " prev_log_term " << request->prev_log_term() << " count " << request->entries_size();
 
-    LOG(INFO) << ss.str();
+    // LOG(INFO) << ss.str();
 
     bool valid_rpc = false;
     int64_t rpc_first_index = request->prev_log_index() + 1;
@@ -371,28 +369,30 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
     CHECK_GT(min_flying_index, 0);
 
     std::deque<bool>::iterator status_it = r->_status_append_entries_in_fly.begin();
-
-    for (std::deque<FlyingAppendEntriesRpc>::iterator rpc_it = r->_append_entries_in_fly.begin();
-        rpc_it != r->_append_entries_in_fly.end(); ++rpc_it) {
+    std::deque<FlyingAppendEntriesRpc>::iterator rpc_it = r->_append_entries_in_fly.begin();
+    for (;rpc_it != r->_append_entries_in_fly.end(); ++rpc_it) {
         if (rpc_it->log_index > rpc_first_index) {
             break;
         }
         if (rpc_it->call_id == cntl->call_id() && *status_it) {
+            *status_it = false;
             valid_rpc = true;
+            break;
         }
         ++status_it;
     }
     /* All are vaild here */
     if (!valid_rpc) {
         ss << " ignore invalid rpc";
-        BRAFT_VLOG << ss.str();
+        LOG(INFO) << ss.str();
+        // BRAFT_VLOG << ss.str();
         CHECK_EQ(0, bthread_id_unlock(r->_id)) << "Fail to unlock " << r->_id;
         return;
     }
 
     if (cntl->Failed()) {
         ss << " fail, sleep.";
-        BRAFT_VLOG << ss.str();
+        LOG(INFO) << ss.str();
 
         // TODO: Should it be VLOG?
         LOG_IF(WARNING, (r->_consecutive_error_times++) % 10 == 0)
@@ -430,7 +430,7 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
         ss << " fail, find next_index remote last_log_index " << response->last_log_index()
            << " local next_index " << r->_next_index 
            << " rpc prev_log_index " << request->prev_log_index();
-        BRAFT_VLOG << ss.str();
+        LOG(INFO) << ss.str();
         if (rpc_send_time > r->_last_rpc_send_timestamp) {
             r->_last_rpc_send_timestamp = rpc_send_time; 
         }
@@ -462,8 +462,8 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
     }
     
 
-    ss << " success";
-    BRAFT_VLOG << ss.str();
+    // ss << " success";
+    // LOG(INFO) << ss.str();
     
     if (response->term() != r->_options.term) {
         LOG(ERROR) << "Group " << r->_options.group_id
@@ -477,17 +477,22 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
         r->_last_rpc_send_timestamp = rpc_send_time; 
     }
     /* All of these entries are presisted. */
-    *status_it = false;
     
     const int entries_size = request->entries_size();
     const int64_t rpc_last_log_index = request->prev_log_index() + entries_size;
-    const int64_t rpc_first_log_index = request->prev_log_index() + 1;
     BRAFT_VLOG_IF(entries_size > 0) << "Group " << r->_options.group_id
                                     << " replicated logs in [" 
                                     << min_flying_index << ", " 
                                     << rpc_last_log_index
                                     << "] to peer " << r->_options.peer_id;
     /* TODO: modify replicator so that it cannot commit repeated ooEntries. We need to know which entries have been committed and only pass the needed indexes to ballot_box. */
+
+    // if (rpc_last_log_index % 100 == 0){
+    //     LOG(INFO) << "_flying_append_entries_size : " << r->_flying_append_entries_size << std::endl
+    //     << "_append_entries_in_fly.size : " << r->_append_entries_in_fly.size() << std::endl
+    //     << "_status_append_entries_in_fly.size : " << r->_status_append_entries_in_fly.size();
+    // }
+
     std::deque<int64_t> commit_indexes;
 
     if (entries_size > 0) {
@@ -497,11 +502,12 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
         /* get uncommitted entries from first_index to last_index */
         std::deque<bool>::iterator commit_it = r->_oo_committed_entries.begin() + (rpc_first_index - r->_oo_start_index);
         int64_t actual_index = rpc_first_index;
-        for (;commit_it!=r->_oo_committed_entries.end();++commit_it){
+        for (int64_t i=0; i < entries_size; i++){
             if (!*commit_it){
                 *commit_it=true;
                 commit_indexes.push_back(actual_index++);
             }
+            commit_it++;
         }
 
         r->_options.ballot_box->commit_at(commit_indexes, r->_options.peer_id);
@@ -509,18 +515,31 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
         if (cntl->request_attachment().size() > 0) {
             g_normalized_send_entries_latency << 
                 cntl->latency_us() * 1024 / cntl->request_attachment().size();
-        }
-        while (r->_oo_committed_entries.front()){
+        }  
+        while (!r->_oo_committed_entries.empty() && r->_oo_committed_entries.front()){
+            // LOG(INFO) << "pop front "  << r->_oo_start_index;
             r->_oo_committed_entries.pop_front();
             r->_oo_start_index++;
         }
     }
+    // LOG(INFO) << "_oo_start_index "  << r->_oo_start_index;
     // A rpc is marked as success, means all request before it are success,
     // erase them sequentially.
     /* TODO: save the committed indexes. Only remove itself and sequential committed entries in the queue. */
+
+    /* Remove itself first */
+    
+    r->_flying_append_entries_size -= request->entries_size();
+    r->_append_entries_in_fly.erase(rpc_it);
+    r->_status_append_entries_in_fly.erase(status_it);
+
     while (!r->_append_entries_in_fly.empty() && 
             (!r->_status_append_entries_in_fly.front() || 
                 r->_append_entries_in_fly.front().log_index + r->_append_entries_in_fly.front().entries_size < r->_oo_start_index)) {
+        // LOG(INFO) << "Pop out " 
+        //             << " start from " << r->_append_entries_in_fly.front().log_index
+        //             << " to " << r->_append_entries_in_fly.front().entries_size
+        //             << " but sequential from " << r->_oo_start_index;
         r->_flying_append_entries_size -= r->_append_entries_in_fly.front().entries_size;
         r->_append_entries_in_fly.pop_front();
         r->_status_append_entries_in_fly.pop_front();
@@ -650,8 +669,6 @@ void Replicator::_send_entries() {
         return;
     }
 
-    std::cout << "prepare to _send_entries" << std::endl;
-
     std::unique_ptr<brpc::Controller> cntl(new brpc::Controller);
     std::unique_ptr<AppendEntriesRequest> request(new AppendEntriesRequest);
     std::unique_ptr<AppendEntriesResponse> response(new AppendEntriesResponse);
@@ -661,6 +678,7 @@ void Replicator::_send_entries() {
         return;
     }
     EntryMeta em;
+    // const int max_entries_size = FLAGS_raft_max_entries_size - _flying_append_entries_size;
     const int max_entries_size = 1; //FLAGS_raft_max_entries_size - _flying_append_entries_size;
     int prepare_entry_rc = 0;
     CHECK_GT(max_entries_size, 0);
@@ -685,18 +703,21 @@ void Replicator::_send_entries() {
     _append_entries_counter++;
     _next_index += request->entries_size();
     _flying_append_entries_size += request->entries_size();
-    while (_oo_start_index + _oo_committed_entries.size() < _next_index){
+    while (_oo_start_index + (int64_t)_oo_committed_entries.size() < _next_index){
         _oo_committed_entries.push_back(false);
     }
     
+    // LOG(INFO) << "_flying_append_entries_size is " << _flying_append_entries_size;
+    // LOG(INFO) << "_append_entries_in_fly.size() is " << _append_entries_in_fly.size();
+
     g_send_entries_batch_counter << request->entries_size();
 
-    LOG(INFO) << "node " << _options.group_id << ":" << _options.server_id
-        << " send AppendEntriesRequest to " << _options.peer_id << " term " << _options.term
-        << " last_committed_index " << request->committed_index()
-        << " prev_log_index " << request->prev_log_index()
-        << " prev_log_term " << request->prev_log_term()
-        << " next_index " << _next_index << " count " << request->entries_size();
+    // LOG(INFO) << "node " << _options.group_id << ":" << _options.server_id
+    //     << " send AppendEntriesRequest to " << _options.peer_id << " term " << _options.term
+    //     << " last_committed_index " << request->committed_index()
+    //     << " prev_log_index " << request->prev_log_index()
+    //     << " prev_log_term " << request->prev_log_term()
+    //     << " next_index " << _next_index << " count " << request->entries_size();
     _st.st = APPENDING_ENTRIES;
     _st.first_log_index = _min_flying_index();
     _st.last_log_index = _next_index - 1;
@@ -755,8 +776,8 @@ void Replicator::_wait_more_entries() {
         _wait_id = _options.log_manager->wait(
                 _next_index - 1, _continue_sending, (void*)_id.value);
         _is_waiter_canceled = false;
-        BRAFT_VLOG << "node " << _options.group_id << ":" << _options.peer_id
-                   << " wait more entries, wait_id " << _wait_id;
+        // LOG(INFO) << "node " << _options.group_id << ":" << _options.peer_id
+        //            << " wait more entries, wait_id " << _wait_id;
     }
     if (_flying_append_entries_size == 0) {
         _st.st = IDLE;
