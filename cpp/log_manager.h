@@ -46,6 +46,7 @@ public:
         StableClosure() : _first_log_index(0) {}
     protected:
         int64_t _first_log_index;
+        int64_t _last_log_index;
     private:
     friend class LogManager;
     friend class AppendBatcher;

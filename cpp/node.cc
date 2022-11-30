@@ -154,11 +154,13 @@ private:
             return;
         }
         // It's safe to release lck as we know everything is ok at this point.
+        _last_log_index = _node->_log_manager->last_log_index();
         lck.unlock();
 
         // DON'T touch _node any more
         _response->set_success(true);
         _response->set_term(_term);
+        _response->set_last_log_index(_last_log_index);
 
         /* TODO: We also need to return the ooCommitted indexes to leader. */
         const int64_t committed_index =
@@ -187,6 +189,7 @@ private:
     google::protobuf::Closure* _done;
     NodeImpl* _node;
     int64_t _term;
+    int64_t _last_log_index;
 };
 
 NodeImpl::NodeImpl(){};

@@ -356,10 +356,10 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
     }
 
     std::stringstream ss;
-    // ss << "node " << r->_options.group_id << ":" << r->_options.server_id 
-    //    << " received AppendEntriesResponse from "
-    //    << r->_options.peer_id << " prev_log_index " << request->prev_log_index()
-    //    << " prev_log_term " << request->prev_log_term() << " count " << request->entries_size();
+    ss << "node " << r->_options.group_id << ":" << r->_options.server_id 
+       << " received AppendEntriesResponse from "
+       << r->_options.peer_id << " prev_log_index " << request->prev_log_index()
+       << " prev_log_term " << request->prev_log_term() << " count " << request->entries_size();
 
     // LOG(INFO) << ss.str();
 
@@ -384,7 +384,7 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
     /* All are vaild here */
     if (!valid_rpc) {
         ss << " ignore invalid rpc";
-        LOG(INFO) << ss.str();
+        // LOG(INFO) << ss.str();
         // BRAFT_VLOG << ss.str();
         CHECK_EQ(0, bthread_id_unlock(r->_id)) << "Fail to unlock " << r->_id;
         return;
@@ -500,14 +500,24 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
         //         min_flying_index, rpc_last_log_index,
         //         r->_options.peer_id);
         /* get uncommitted entries from first_index to last_index */
-        std::deque<bool>::iterator commit_it = r->_oo_committed_entries.begin() + (rpc_first_index - r->_oo_start_index);
-        int64_t actual_index = rpc_first_index;
-        for (int64_t i=0; i < entries_size; i++){
-            if (!*commit_it){
-                *commit_it=true;
-                commit_indexes.push_back(actual_index++);
+        // LOG(INFO) << "response->last_log_index() " << response->last_log_index(); 
+        while (r->_oo_start_index < response->last_log_index()){
+            if (!r->_oo_committed_entries.front()){
+                commit_indexes.push_back(r->_oo_start_index);
             }
-            commit_it++;
+            r->_oo_committed_entries.pop_front();
+            r->_oo_start_index++;
+        }
+        if (request->prev_log_index() + request->entries_size() >= r->_oo_start_index){
+            rpc_first_index = std::max(r->_oo_start_index, request->prev_log_index() + 1);
+            std::deque<bool>::iterator commit_it = r->_oo_committed_entries.begin() + (rpc_first_index - r->_oo_start_index);
+            for (int64_t i=rpc_first_index; i <= request->prev_log_index() + request->entries_size(); i++){
+                if (!*commit_it){
+                    *commit_it=true;
+                    commit_indexes.push_back(i);
+                }
+                commit_it++;
+            }
         }
 
         r->_options.ballot_box->commit_at(commit_indexes, r->_options.peer_id);
@@ -535,7 +545,7 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
 
     while (!r->_append_entries_in_fly.empty() && 
             (!r->_status_append_entries_in_fly.front() || 
-                r->_append_entries_in_fly.front().log_index + r->_append_entries_in_fly.front().entries_size < r->_oo_start_index)) {
+                r->_append_entries_in_fly.front().log_index + r->_append_entries_in_fly.front().entries_size <= r->_oo_start_index)) {
         // LOG(INFO) << "Pop out " 
         //             << " start from " << r->_append_entries_in_fly.front().log_index
         //             << " to " << r->_append_entries_in_fly.front().entries_size

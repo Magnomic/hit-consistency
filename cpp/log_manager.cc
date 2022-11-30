@@ -326,7 +326,7 @@ int LogManager::check_and_resolve_conflict(
         // std::cout << " entries->size() : " << entries->size() << std::endl;
         if (entries->front()->id.index == _last_log_index + 1) {
             // Fast path
-            _last_log_index = entries->back()->id.index;
+            // _last_log_index = entries->back()->id.index;
         } else {
             if (entries->back()->id.index > _max_log_index){
                 _max_log_index = entries->back()->id.index;
@@ -357,7 +357,7 @@ int LogManager::check_and_resolve_conflict(
                             (*entries)[conflicting_index]->id.index - 1);
                 }
                 /* If it happens, _last_log_index will be the last index of entry in this replication. */
-                _last_log_index = entries->back()->id.index;
+                // _last_log_index = entries->back()->id.index;
             }  // else this is a duplicated AppendEntriesRequest, we have 
                // nothing to do besides releasing all the entries
             
@@ -414,6 +414,7 @@ void LogManager::append_entries(
     for (size_t i = 0; i < entries->size(); ++i) {
         // Add ref for disk_thread
         (*entries)[i]->AddRef();
+        // LOG(INFO) << "(*entries)[i]->id.index " << (*entries)[i]->id.index;
         if ((*entries)[i]->type == ENTRY_TYPE_CONFIGURATION) {
             ConfigurationEntry conf_entry(*((*entries)[i]));
             _config_manager->add(conf_entry);
@@ -428,8 +429,10 @@ void LogManager::append_entries(
             if ((*it)->id.index >= entries->front()->id.index){
                 break;
             }
+            // LOG(INFO) << "(*it)->id.index " << (*it)->id.index;
             ++it;
         }
+        
         std::vector<LogEntry*>::iterator it_entry = entries->begin();
         while (it_entry != entries->end() && it != _logs_in_memory.end()){
             if ((*it_entry)->id.index != (*it)->id.index){
@@ -444,16 +447,27 @@ void LogManager::append_entries(
             }
         }
         while (it_entry != entries->end()){
-            _logs_in_memory.push_back(*it_entry++);
+            _logs_in_memory.push_back(*it_entry);
+            it_entry++;
         }
-        while (it != _logs_in_memory.end() && (*it)->id.index == _last_log_index + 1){
-            _last_log_index++;
+        // if (_logs_in_memory.size() % 100 == 0){
+        //     std::stringstream ss;
+        //     for (std::deque<LogEntry*>::iterator t_it = _logs_in_memory.begin(); t_it != _logs_in_memory.end(); t_it++){
+        //         ss << (*t_it)->id.index << ', ';
+        //     }
+        //     LOG(INFO) << ss;
+        // }
+        it = _logs_in_memory.begin();
+        while (it + 1 != _logs_in_memory.end() && (*it)->id.index + 1 == (*(it + 1))->id.index){
+            _last_log_index = std::max(_last_log_index, (*(it + 1))->id.index);
+            // _logs_in_memory.pop_front();
             it++;
         }
         _max_log_index = std::max(entries->back()->id.index, _max_log_index);
     }
 
     done->_entries.swap(*entries);
+    // LOG(INFO) << "_last_log_index " << _last_log_index;
     int ret = bthread::execution_queue_execute(_disk_queue, done);
     CHECK_EQ(0, ret) << "execq execute failed, ret: " << ret << " err: " << berror();
     wakeup_all_waiter(lck);
@@ -631,6 +645,11 @@ LogEntry* LogManager::get_entry_from_memory(const int64_t index) {
     if (!_logs_in_memory.empty()) {
         int64_t first_index = _logs_in_memory.front()->id.index;
         int64_t last_index = _logs_in_memory.back()->id.index;
+        // LOG(INFO) << "get entry index = " << index;
+        if (first_index <= index && index <= _last_log_index){
+            entry = _logs_in_memory[index - first_index];
+            return entry;
+        }
         /* ooEntries don't follow this constrain */
         // CHECK_EQ(last_index - first_index + 1, static_cast<int64_t>(_logs_in_memory.size()));
         if (index >= first_index && index <= last_index) {
