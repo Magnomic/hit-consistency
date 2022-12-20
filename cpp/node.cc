@@ -490,6 +490,7 @@ void NodeImpl::apply_task(const Task& task){
     LogEntryAndClosure m;
     m.entry = entry;
     m.done = task.done;
+    m.dependency_id = task.dependency_id;
     m.expected_term = task.expected_term;
     if (_apply_queue->execute(m, &bthread::TASK_OPTIONS_INPLACE, NULL) != 0){
         task.done->status().set_error(EPERM, "Node is down");
@@ -991,6 +992,24 @@ bool NodeImpl::handle_out_of_order_append_entries(brpc::Controller* cntl,
     return 0;
  }
 
+uint64_t NodeImpl::check_dependency(int64_t dependency_id){
+    uint64_t dependency = 0;
+    
+    if (_dependency_id_queue.size() > 64){
+        _dependency_id_queue.pop_front();
+    }
+
+    for (std::deque<int64_t>::iterator it = _dependency_id_queue.begin(); it != _dependency_id_queue.end(); it++){
+        if (*it == dependency_id){
+            dependency = dependency | 1;
+        }
+        dependency = dependency << 1;
+    }
+    _dependency_id_queue.push_back(dependency_id);
+
+    return dependency;
+}
+
 void NodeImpl::apply(LogEntryAndClosure tasks[], size_t size) {
 
     std::vector<LogEntry*> entries;
@@ -1029,6 +1048,10 @@ void NodeImpl::apply(LogEntryAndClosure tasks[], size_t size) {
             tasks[i].entry->Release();
             continue;
         }
+        // Check dependency
+        tasks[i].entry->dependency = check_dependency(tasks[i].dependency_id);
+        // LOG(INFO) << "dependency_id : " << tasks[i].dependency_id; 
+        // LOG(INFO) << "dependency : " << tasks[i].entry->dependency; 
         entries.push_back(tasks[i].entry);
         entries.back()->id.term = _current_term;
         entries.back()->type = ENTRY_TYPE_DATA;

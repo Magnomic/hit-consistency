@@ -13,7 +13,7 @@
 
 DEFINE_string(server_addr, "0.0.0.0:8000", "Server listen address, may be IPV4/IPV6/UDS."
             " If this is set, the flag port will be ignored");
-DEFINE_int32(block_size, 64 * 1024u, "Size of block");
+DEFINE_int32(block_size, 1 * 1024u, "Size of block");
 DEFINE_int32(request_size, 1, "Size of each requst");
 DEFINE_int32(thread_num, 1, "thread number");
 
@@ -42,8 +42,9 @@ static void* sender(void* arg){
         cntl.set_timeout_ms(500);
         hit_consistency::StateMachineRequest request;
         hit_consistency::StateMachineResponse response;
-        request.set_offset(butil::fast_rand_less_than(
-                            FLAGS_block_size - FLAGS_request_size));
+        uint64_t offset = butil::fast_rand_less_than(
+                            FLAGS_block_size - FLAGS_request_size);
+        request.set_offset(offset);
 
         cntl.request_attachment().resize(FLAGS_request_size, (char) (rand() % 26 + 65));
         stub.write(&cntl, &request, &response, NULL);

@@ -113,6 +113,7 @@ private:
     mutable butil::Mutex _fd_mutex;
     butil::atomic<int64_t> _leader_term;
     NodeImpl* volatile _node;
+    std::deque<int64_t> _confliction_offsets;
 
 private:
 friend class StateMachineClosure;
@@ -259,9 +260,11 @@ public:
             return;
         }
         log.append(*data);
+
         // Apply this log as a braft::Task
         Task task;
         task.data = &log;
+        task.dependency_id = request->offset();
         task.expected_term = -1;
         task.done = new StateMachineClosure(this, request, response,
                                      data, done_guard.release());

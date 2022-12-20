@@ -56,15 +56,17 @@ enum CheckSumType {
 // Format of Header, all fields are in network order
 // | -------------------- term (64bits) -------------------------  |
 // | ------------------- index (64bits) -------------------------  |
+// | ----------------- dependency (64bits) ----------------------  |
 // | entry-type (8bits) | checksum_type (8bits) | reserved(16bits) |
 // | ------------------ data len (32bits) -----------------------  |
 // | data_checksum (32bits) | header checksum (32bits)             |
 
-const static size_t ENTRY_HEADER_SIZE = 32;
+const static size_t ENTRY_HEADER_SIZE = 40;
 
 struct Segment::EntryHeader {
     int64_t term;
     int64_t index;
+    int64_t dependency;
     int type;
     int checksum_type;
     uint32_t data_len;
@@ -162,12 +164,14 @@ int Segment::_load_entry(off_t offset, EntryHeader* head, butil::IOBuf* data,
     const char *p = (const char *)buf.fetch(header_buf, ENTRY_HEADER_SIZE);
     int64_t term = 0;
     int64_t index = 0;
+    int64_t dependency = 0;
     uint32_t meta_field;
     uint32_t data_len = 0;
     uint32_t data_checksum = 0;
     uint32_t header_checksum = 0;
     RawUnpacker(p).unpack64((uint64_t&)term)
                   .unpack64((uint64_t&)index)
+                  .unpack64((uint64_t&)dependency)
                   .unpack32(meta_field)
                   .unpack32(data_len)
                   .unpack32(data_checksum)
@@ -175,6 +179,7 @@ int Segment::_load_entry(off_t offset, EntryHeader* head, butil::IOBuf* data,
     EntryHeader tmp;
     tmp.term = term;
     tmp.index = index;
+    tmp.dependency = dependency;
     tmp.type = meta_field >> 24;
     tmp.checksum_type = (meta_field << 8) >> 24;
     tmp.data_len = data_len;
@@ -401,6 +406,7 @@ int Segment::append(const LogEntry* entry) {
     RawPacker packer(header_buf);
     packer.pack64(entry->id.term)
           .pack64(entry->id.index)
+          .pack64(entry->dependency)
           .pack32(meta_field)
           .pack32((uint32_t)data.length())
           .pack32(get_checksum(_checksum_type, data));

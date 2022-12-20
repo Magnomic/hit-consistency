@@ -205,6 +205,8 @@ friend class FollowerStableClosure;
         ReplicatorGroup _replicator_group;
 
         std::deque<int64_t> _entries_index_sequence;
+
+        std::deque<int64_t> _dependency_id_queue;
         
         std::vector<Closure*> _shutdown_continuations;
 
@@ -236,6 +238,8 @@ friend class FollowerStableClosure;
         int init(NodeOptions node_options, const GroupId& group_id, const PeerId& peer_id);
 
         int start();
+
+        uint64_t check_dependency(int64_t dependency_id);
 
         void apply_task(const Task& task);
 

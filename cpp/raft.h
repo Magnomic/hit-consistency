@@ -35,6 +35,7 @@ private:
 
 struct LogEntryAndClosure {
     LogEntry* entry;
+    int64_t dependency_id;
     Closure* done;
     int64_t expected_term;
 };
@@ -179,7 +180,7 @@ inline std::ostream& operator<<(std::ostream& os, const Error& e) {
 
 // Basic message structure of libraft
 struct Task {
-    Task() : data(NULL), done(NULL), expected_term(-1) {}
+    Task() : data(NULL), done(NULL), expected_term(-1), dependency_id(0) {}
 
     // The data applied to StateMachine
     butil::IOBuf* data;
@@ -191,6 +192,8 @@ struct Task {
     // this Node if the value is not -1
     // Default: -1
     int64_t expected_term;
+
+    int64_t dependency_id;
 };
 
 class NodeImpl;

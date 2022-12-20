@@ -26,6 +26,7 @@ struct LogEntry : public butil::RefCountedThreadSafe<LogEntry> {
 public:
     hit_consistency::EntryType type; // log type
     LogId id;
+    int64_t dependency;
     std::vector<PeerId>* peers; // peers
     std::vector<PeerId>* old_peers; // peers
     butil::IOBuf data;
