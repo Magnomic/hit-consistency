@@ -37,6 +37,7 @@ message EntryMeta {
     // Don't change field id of `old_peers' in the consideration of backward
     // compatibility
     repeated string old_peers = 5;
+    required int64 dependency = 6;
 };
 
 message RequestVoteRequest {
@@ -62,6 +63,7 @@ message AppendEntriesRequest {
     repeated EntryMeta entries = 7;
     required int64 committed_index = 8;
     repeated int64 committed_oo_index = 9;
+    required int64 dependency = 10;
 };
 
 message AppendEntriesResponse {

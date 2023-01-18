@@ -55,6 +55,19 @@ public:
     int64_t last_committed_index() 
     { return _last_committed_index.load(butil::memory_order_acquire); }
 
+    int64_t oo_commited_indexes(std::vector<int64_t>* start_committed_index){
+        std::unique_lock<raft::raft_mutex_t> lck(_mutex);
+        int64_t local_pending_index = _pending_index;
+        for (std::deque<bool>::iterator it = _committed_index_queue.begin(); it != _committed_index_queue.end(); it++){
+            if (*it){
+                start_committed_index->push_back(local_pending_index);
+            }
+            local_pending_index++;
+        }
+        return _pending_index;
+
+    }
+
     void describe(std::ostream& os, bool use_html);
 
     void get_status(BallotBoxStatus* ballot_box_status);

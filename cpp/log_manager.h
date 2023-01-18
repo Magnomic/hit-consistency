@@ -5,6 +5,7 @@
 #include <butil/macros.h>                        // BAIDU_CACHELINE_ALIGNMENT
 #include <butil/containers/flat_map.h>           // butil::FlatMap
 #include <deque>                                // std::deque
+#include <bitset>
 #include <bthread/execution_queue.h>            // bthread::ExecutionQueueId
 #include <bvar/latency_recorder.h>
 
@@ -86,6 +87,8 @@ public:
     // Returns:
     //  success return last memory and logstorage index, empty return 0
     int64_t last_log_index(bool is_flush = false);
+
+    int64_t max_log_index(bool is_flush = false);
     
     // Return the id the last log.
     LogId last_log_id(bool is_flush = false);
@@ -127,6 +130,10 @@ public:
     // Get the internal status of LogManager.
     void get_status(LogManagerStatus* status);
 
+    bool check_dependency(int64_t this_log_index, int64_t dependency);
+
+    int64_t get_dependency_bitmap();
+
 private:
 friend class AppendBatcher;
     struct WaitMeta {
@@ -167,6 +174,7 @@ friend class AppendBatcher;
 
     int64_t unsafe_get_term(const int64_t index);
 
+
     // Start a independent thread to append log to LogStorage
     int start_disk_thread();
     int stop_disk_thread();
@@ -187,7 +195,10 @@ friend class AppendBatcher;
     bool _stopped;
     butil::atomic<bool> _has_error;
     WaitId _next_wait_id;
+    int64_t _base_bit = 1;
 
+    // 011111111...63
+    int64_t _MAX_DEPENDENCY = (1L << 63) - 1;
     LogId _disk_id;
     LogId _applied_id;
     // TODO(chenzhangyi01): replace deque with a thread-safe data structure
@@ -197,6 +208,8 @@ friend class AppendBatcher;
     int64_t _last_log_index;
     // 乱序达到的最大index
     int64_t _max_log_index;
+
+    int64_t _dependency_bitmap;
 
     LogId _last_snapshot_id;
     // the virtual first log, for finding next_index of replicator, which 

@@ -8,6 +8,7 @@
 #include <butil/raw_pack.h>                          // butil::RawPacker
 #include <butil/fd_utility.h>                        // butil::make_close_on_exec
 #include <brpc/reloadable_flags.h>             // 
+#include <bitset>
 
 #include "local_storage.pb.h"
 #include "log_entry.h"
@@ -184,6 +185,8 @@ int Segment::_load_entry(off_t offset, EntryHeader* head, butil::IOBuf* data,
     tmp.checksum_type = (meta_field << 8) >> 24;
     tmp.data_len = data_len;
     tmp.data_checksum = data_checksum;
+
+    // LOG(INFO) << "UNPACK entry->id.index " << tmp.index << " entry->dependency " << std::bitset<64>(tmp.dependency);
     
     if (tmp.term == 0){
         return -2;
@@ -403,6 +406,7 @@ int Segment::append(const LogEntry* entry) {
     CHECK_LE(data.length(), 1ul << 56ul);
     char header_buf[ENTRY_HEADER_SIZE];
     const uint32_t meta_field = (entry->type << 24 ) | (_checksum_type << 16);
+    // LOG(INFO) << "PACK entry->id.index " << entry->id.index << " entry->dependency " << std::bitset<64>(entry->dependency);
     RawPacker packer(header_buf);
     packer.pack64(entry->id.term)
           .pack64(entry->id.index)
@@ -509,6 +513,7 @@ LogEntry* Segment::get(const int64_t index) const {
         entry->id.index = index;
         entry->id.term = header.term;
         entry->type = (EntryType)header.type;
+        entry->dependency = header.dependency;
     } while (0);
 
     if (!ok && entry != NULL) {

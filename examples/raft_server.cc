@@ -328,9 +328,16 @@ private:
 
 int main(int argc, char** argv) {
 
-    
+
     gflags::ParseCommandLineFlags(&argc, &argv, true);
     
+    std::string log_path = std ::to_string(FLAGS_port) + ".log";
+
+    ::logging::LoggingSettings log_setting; 
+    log_setting.log_file = log_path.c_str(); 
+    log_setting.logging_dest = logging::LOG_TO_FILE; 
+    ::logging::InitLogging(log_setting);  
+
     butil::EndPoint addr(butil::IP_ANY, FLAGS_port);
 
     brpc::Server server;

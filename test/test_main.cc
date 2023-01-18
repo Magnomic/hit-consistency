@@ -3,6 +3,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <bitset>
 #include <butil/logging.h>
 #include <butil/files/file_path.h>
 #include <butil/file_util.h>
@@ -23,6 +24,11 @@ public:
 
 int main(int argc, char* argv[]) {
     std::vector<int64_t> entries = {1 ,2 ,3 ,4 ,5};
+    int64_t temp = (1L << 63) - 1;
+    std::cout << std::bitset<64>(temp) << std::endl;
+    std::cout << std::bitset<64>(-1)<< std::endl;
+    std::cout << std::bitset<64>(-1 >> 1)<< std::endl;
+    std::cout << std::bitset<64>(-1 << 1)<< std::endl;
     std::cout << " entries->begin() : " << *entries.begin() << std::endl;
     std::cout << " entries->end() : " << *(entries.end()-1) << std::endl;
     entries.erase(entries.begin(), entries.end());

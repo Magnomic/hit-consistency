@@ -392,7 +392,7 @@ void Replicator::_on_rpc_returned(ReplicatorId id, brpc::Controller* cntl,
 
     if (cntl->Failed()) {
         ss << " fail, sleep.";
-        LOG(INFO) << ss.str();
+        // LOG(INFO) << ss.str();
 
         // TODO: Should it be VLOG?
         LOG_IF(WARNING, (r->_consecutive_error_times++) % 10 == 0)
@@ -570,6 +570,7 @@ int Replicator::_fill_common_fields(AppendEntriesRequest* request,
     const int64_t prev_log_term = _options.log_manager->get_term(prev_log_index);
     if (prev_log_term == 0 && prev_log_index != 0) {
         if (!is_heartbeat) {
+            LOG(INFO) << "_options.log_manager->first_log_index() = " << _options.log_manager->first_log_index() << " prev_log_index = " << prev_log_index;
             CHECK_LT(prev_log_index, _options.log_manager->first_log_index());
             BRAFT_VLOG << "Group " << _options.group_id
                        << " log_index=" << prev_log_index << " was compacted";
@@ -589,7 +590,20 @@ int Replicator::_fill_common_fields(AppendEntriesRequest* request,
     request->set_peer_id(_options.peer_id.to_string());
     request->set_prev_log_index(prev_log_index);
     request->set_prev_log_term(prev_log_term);
-    request->set_committed_index(_options.ballot_box->last_committed_index());
+    std::vector<int64_t> oo_committed_entries_indexes;
+    int64_t committed_index = _options.ballot_box->oo_commited_indexes(&oo_committed_entries_indexes);
+
+    if (_oo_start_index < committed_index){
+        committed_index = _oo_start_index - 1;
+    }
+
+    request->set_committed_index(committed_index);
+    for (int64_t i=0;i<oo_committed_entries_indexes.size();i++){
+        if (oo_committed_entries_indexes[i] - _oo_start_index < _oo_committed_entries.size() && 
+                _oo_committed_entries[oo_committed_entries_indexes[i] - _oo_start_index]){
+            request->add_committed_oo_index(oo_committed_entries_indexes[i]);
+        }
+    }
     return 0;
 }
 
@@ -625,6 +639,7 @@ void Replicator::_send_empty_entries(bool is_heartbeat) {
         << " prev_log_index " << request->prev_log_index()
         << " last_committed_index " << request->committed_index();
 
+    request->set_dependency(0);
     google::protobuf::Closure* done = brpc::NewCallback(
                 is_heartbeat ? _on_heartbeat_returned : _on_rpc_returned, 
                 _id.value, cntl.get(), request.get(), response.get(),
@@ -648,6 +663,9 @@ int Replicator::_prepare_entry(int offset, EntryMeta* em, butil::IOBuf *data) {
 
     em->set_term(entry->id.term);
     em->set_type(entry->type);
+    em->set_dependency(entry->dependency);
+
+    // LOG(INFO) << "log_index = " << _next_index << "entry->dependency " << std::bitset<64>(entry->dependency);
     if (entry->peers != NULL) {
         CHECK(!entry->peers->empty()) << "log_index=" << log_index;
         for (size_t i = 0; i < entry->peers->size(); ++i) {
@@ -669,6 +687,7 @@ int Replicator::_prepare_entry(int offset, EntryMeta* em, butil::IOBuf *data) {
 
 void Replicator::_send_entries() {
     if (_flying_append_entries_size >= FLAGS_raft_max_entries_size ||
+        _status_append_entries_in_fly.size() >= FLAGS_raft_max_entries_size || 
         _append_entries_in_fly.size() >= (size_t)FLAGS_raft_max_parallel_append_entries_rpc_num ||
         _st.st == BLOCKING) {
         LOG(INFO) << "node " << _options.group_id << ":" << _options.server_id
@@ -691,14 +710,22 @@ void Replicator::_send_entries() {
     // const int max_entries_size = FLAGS_raft_max_entries_size - _flying_append_entries_size;
     const int max_entries_size = 1; //FLAGS_raft_max_entries_size - _flying_append_entries_size;
     int prepare_entry_rc = 0;
+    int64_t temp_dependency = 0L;
     CHECK_GT(max_entries_size, 0);
     for (int i = 0; i < max_entries_size; ++i) {
+        // Note that dependencies are also regarded as an attribute in AppendEntriesRequest.
+        // It should use the last entry index as the end index.
+        // In the paper version, max_entries_size is set to 1, so it is same to the dependency of the only entry in the request.
         prepare_entry_rc = _prepare_entry(i, &em, &cntl->request_attachment());
         if (prepare_entry_rc != 0) {
             break;
         }
+        temp_dependency = (temp_dependency << 1) | em.dependency();
         request->add_entries()->Swap(&em);
     }
+    // LOG(INFO) << "_next_index = " << _next_index << "temp_dependency " << std::bitset<64>(temp_dependency);
+    request->set_dependency(temp_dependency);
+
     if (request->entries_size() == 0) {
         // _id is unlock in _wait_more
         if (_next_index < _options.log_manager->first_log_index()) {

@@ -13,7 +13,7 @@
 
 DEFINE_string(server_addr, "0.0.0.0:8000", "Server listen address, may be IPV4/IPV6/UDS."
             " If this is set, the flag port will be ignored");
-DEFINE_int32(block_size, 1 * 1024u, "Size of block");
+DEFINE_int32(block_size, 1 * 32u, "Size of block");
 DEFINE_int32(request_size, 1, "Size of each requst");
 DEFINE_int32(thread_num, 1, "thread number");
 

@@ -8,6 +8,7 @@
 #include <thread>
 #include <functional>
 #include <set>
+#include <bitset>
 
 #include <butil/logging.h>
 #include <butil/atomic_ref_count.h>
@@ -123,14 +124,17 @@ friend class FollowerStableClosure;
     public:
         AppendEntriesCache(NodeImpl* node, int64_t version)
             : _node(node), _timer(bthread_timer_t())
-            , _cache_version(0), _timer_version(0) {}
+            , _cache_version(0), _timer_version(0)
+            , _local_last_log_index(0), _dependency_bitmap(0) {}
 
         int64_t first_index() const;
         int64_t cache_version() const;
         bool empty() const;
         bool store(AppendEntriesRpc* rpc);
-        void process_runable_rpcs(int64_t local_last_index);
+        void process_runable_rpcs(int64_t dependency_bitmap, int64_t last_log_index);
         void clear();
+        // void notify_commit(int64_t prev_log_index, int64_t num_entries);
+        // bool check_dependency(int64_t prev_log_index, int64_t dependency);
         void do_handle_append_entries_cache_timedout(
                 int64_t timer_version, int64_t timer_start_ms);
 
@@ -144,6 +148,8 @@ friend class FollowerStableClosure;
         butil::LinkedList<AppendEntriesRpc> _rpc_queue;
         std::map<int64_t, AppendEntriesRpc*> _rpc_map;
         bthread_timer_t _timer;
+        int64_t _local_last_log_index;
+        int64_t _dependency_bitmap;
         int64_t _cache_version;
         int64_t _timer_version;
     };
@@ -207,12 +213,17 @@ friend class FollowerStableClosure;
         std::deque<int64_t> _entries_index_sequence;
 
         std::deque<int64_t> _dependency_id_queue;
+
+        uint64_t _dependency_status;
         
         std::vector<Closure*> _shutdown_continuations;
 
         bthread::ExecutionQueueId<LogEntryAndClosure> _apply_queue_id;
 
         bthread::ExecutionQueue<LogEntryAndClosure>::scoped_ptr_t _apply_queue;
+
+        // 011111111...63
+        int64_t _MAX_DEPENDENCY = (1L << 63) - 1;
 
         NodeImpl();
         
@@ -239,7 +250,9 @@ friend class FollowerStableClosure;
 
         int start();
 
-        uint64_t check_dependency(int64_t dependency_id);
+        int64_t check_dependency(int64_t dependency_id);
+
+        bool resolve_dependency(int64_t last_term, int64_t last_index, int64_t dependency_id);
 
         void apply_task(const Task& task);
 
@@ -309,6 +322,6 @@ friend class FollowerStableClosure;
 
         static void* handle_append_entries_from_cache(void* arg);
 
-        void check_append_entries_cache(int64_t local_last_index);
+        void check_append_entries_cache(int64_t dependency_bitmap, int64_t last_log_index);
 };
 #endif 

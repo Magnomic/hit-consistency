@@ -127,6 +127,7 @@ private:
     }
     void run() {
         brpc::ClosureGuard done_guard(_done);
+        // LOG(INFO) << "Entry " << _request->prev_log_index() + _request->entries_size() << " written";
         if (!status().ok()) {
             _cntl->SetFailed(status().error_code(), "%s",
                              status().error_cstr());
@@ -155,6 +156,8 @@ private:
         }
         // It's safe to release lck as we know everything is ok at this point.
         _last_log_index = _node->_log_manager->last_log_index();
+        // tell cache committed entries, which can help it check dependency completion
+        // _node->_append_entries_cache->notify_commit(_request->prev_log_index(), _request->entries_size());
         lck.unlock();
 
         // DON'T touch _node any more
@@ -162,24 +165,30 @@ private:
         _response->set_term(_term);
         _response->set_last_log_index(_last_log_index);
 
+        const int64_t committed_index = _request->committed_index();
         /* TODO: We also need to return the ooCommitted indexes to leader. */
-        const int64_t committed_index =
-                std::min(_request->committed_index(),
-                         // ^^^ committed_index is likely less than the
-                         // last_log_index
-                         _request->prev_log_index() + _request->entries_size()
-                         // ^^^ The logs after the appended entries are
-                         // untrustable so we can't commit them even if their
-                         // indexes are less than request->committed_index()
-                        );
+        // const int64_t committed_index =
+        //         std::min(_request->committed_index(),
+        //                  // ^^^ committed_index is likely less than the
+        //                  // last_log_index
+        //                  _request->prev_log_index() + _request->entries_size()
+        //                  // ^^^ The logs after the appended entries are
+        //                  // untrustable so we can't commit them even if their
+        //                  // indexes are less than request->committed_index()
+        //                 );
         //_ballot_box is thread safe and tolerats disorder.
         std::deque<int64_t> oo_entries;
-        for (int64_t i = 1; i <= _request->entries_size(); i++){
-            if (_request->committed_index() >= _request->prev_log_index() + i) {
-                continue;
-            }
-            oo_entries.push_back(_request->prev_log_index() + i);
+        
+        for (int64_t i = 1; i <= _request->committed_oo_index_size(); i++){
+            oo_entries.push_back(_request->committed_oo_index(i));
         }
+
+        // for (int64_t i = 1; i <= _request->entries_size(); i++){
+        //     if (_request->committed_index() >= _request->prev_log_index() + i) {
+        //         continue;
+        //     }
+        //     oo_entries.push_back(_request->prev_log_index() + i);
+        // }
         _node->_ballot_box->set_last_committed_index(committed_index, oo_entries);
     }
 
@@ -262,6 +271,11 @@ int NodeImpl::init(NodeOptions node_options, const GroupId& group_id, const Peer
         LOG(ERROR) << "node " << _group_id << ":" << _server_id
                    << " init _ballot_box failed";
         return -1;
+    }
+
+    // init cache
+    if (!_append_entries_cache) {
+        _append_entries_cache = new AppendEntriesCache(this, ++_append_entries_cache_version);
     }
     
     // init replicator
@@ -831,13 +845,15 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
 
     const int64_t prev_log_index = request->prev_log_index();
     const int64_t prev_log_term = request->prev_log_term();
+    const int64_t dependency = request->dependency();
     const int64_t local_prev_log_term = _log_manager->get_term(prev_log_index); // check the term continuity of the entries. but for ooEntries, prev_log_index cannot be obtained.
-    if (local_prev_log_term != prev_log_term && !FLAGS_oo_enabled) {
+    if (local_prev_log_term != prev_log_term && !FLAGS_oo_enabled || !_log_manager->check_dependency(prev_log_index + request->entries_size(), dependency)) {
+                                                                      // if it has unsaved dependencies, the request must be cached!
         int64_t last_index = _log_manager->last_log_index();
         int64_t saved_term = request->term();
         int     saved_entries_size = request->entries_size();
         std::string rpc_server_id = request->server_id();
-        if (FLAGS_cache_enabled && !from_append_entries_cache && handle_out_of_order_append_entries(cntl, request, response, done, last_index)) {
+        if (FLAGS_cache_enabled  && !from_append_entries_cache && handle_out_of_order_append_entries(cntl, request, response, done, last_index)) {
             // It's not safe to touch cntl/request/response/done after this point,
             // since the ownership is tranfered to the cache.
             lck.unlock();
@@ -858,16 +874,16 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         response->set_term(_current_term);
         response->set_last_log_index(last_index);
         lck.unlock();
-        // LOG(WARNING) << "node " << _group_id << ":" << _server_id
-        //              << " reject term_unmatched AppendEntries from " 
-        //              << request->server_id()
-        //              << " in term " << request->term()
-        //              << " prev_log_index " << request->prev_log_index()
-        //              << " prev_log_term " << request->prev_log_term()
-        //              << " local_prev_log_term " << local_prev_log_term
-        //              << " last_log_index " << last_index
-        //              << " entries_size " << request->entries_size()
-        //              << " from_append_entries_cache: " << from_append_entries_cache;
+        LOG(WARNING) << "node " << _group_id << ":" << _server_id
+                     << " reject term_unmatched AppendEntries from " 
+                     << request->server_id()
+                     << " in term " << request->term()
+                     << " prev_log_index " << request->prev_log_index()
+                     << " prev_log_term " << request->prev_log_term()
+                     << " local_prev_log_term " << local_prev_log_term
+                     << " last_log_index " << last_index
+                     << " entries_size " << request->entries_size()
+                     << " from_append_entries_cache: " << from_append_entries_cache;
         return;
     }
 
@@ -904,6 +920,13 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
             log_entry->id.term = entry.term();
             log_entry->id.index = index;
             log_entry->type = (EntryType)entry.type();
+            // We needs to check all the dependency confliction.
+            // But it can resolve the entry dependencies in a FIXED range, e.g., 64 by default.
+            log_entry->dependency = entry.dependency();
+            // if (entry.dependency() > 0) {
+            //     LOG(INFO) << "entry " << index << " has entry.dependency : " << std::bitset<64>(entry.dependency());
+            //     // Check all the entries are persisted in this node.
+            // }
             if (entry.peers_size() > 0) {
                 log_entry->peers = new std::vector<PeerId>;
                 for (int i = 0; i < entry.peers_size(); i++) {
@@ -928,8 +951,9 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
     }
 
     // check out-of-order cache
+    // We should also notify cache manager that this entry has been committed.
     if (FLAGS_cache_enabled){
-        check_append_entries_cache(index);
+        check_append_entries_cache(_log_manager->get_dependency_bitmap(), _log_manager->max_log_index());
     }
 
     FollowerStableClosure* c = new FollowerStableClosure(
@@ -955,16 +979,17 @@ bool NodeImpl::handle_out_of_order_append_entries(brpc::Controller* cntl,
         _append_entries_cache = new AppendEntriesCache(this, ++_append_entries_cache_version);
     }
     AppendEntriesRpc* rpc = new AppendEntriesRpc;
+    LOG(INFO) << "Add entry " << request->prev_log_index() + 1 << " to cache ";
     rpc->cntl = cntl;
     rpc->request = request;
     rpc->response = response;
     rpc->done = done;
     rpc->receive_time_ms = butil::gettimeofday_ms();
     bool rc = _append_entries_cache->store(rpc);
-    if (!rc && _append_entries_cache->empty()) {
-        delete _append_entries_cache;
-        _append_entries_cache = NULL;
-    }
+    // if (!rc && _append_entries_cache->empty()) {
+    //     delete _append_entries_cache;
+    //     _append_entries_cache = NULL;
+    // }
     return rc;
 }
 
@@ -992,10 +1017,25 @@ bool NodeImpl::handle_out_of_order_append_entries(brpc::Controller* cntl,
     return 0;
  }
 
-uint64_t NodeImpl::check_dependency(int64_t dependency_id){
-    uint64_t dependency = 0;
+bool NodeImpl::resolve_dependency(int64_t last_term, int64_t last_index, int64_t dependency_id){
+    if (dependency_id == 0){
+        return true;
+    }
+    int64_t offset = 0;
+    while (dependency_id > 0){
+        offset++;
+        if (dependency_id % 2 != 0 && _log_manager->get_term(last_index - offset) != last_term){
+            return false;
+        }
+        dependency_id = dependency_id >> 1;
+    }
+    return true;
+}
+
+int64_t NodeImpl::check_dependency(int64_t dependency_id){
+    int64_t dependency = 0L;
     
-    if (_dependency_id_queue.size() > 64){
+    if (_dependency_id_queue.size() > 63){
         _dependency_id_queue.pop_front();
     }
 
@@ -1051,7 +1091,7 @@ void NodeImpl::apply(LogEntryAndClosure tasks[], size_t size) {
         // Check dependency
         tasks[i].entry->dependency = check_dependency(tasks[i].dependency_id);
         // LOG(INFO) << "dependency_id : " << tasks[i].dependency_id; 
-        // LOG(INFO) << "dependency : " << tasks[i].entry->dependency; 
+        // LOG(INFO) << "dependency : " << std::bitset<64>(tasks[i].entry->dependency); 
         entries.push_back(tasks[i].entry);
         entries.back()->id.term = _current_term;
         entries.back()->type = ENTRY_TYPE_DATA;
@@ -1468,12 +1508,12 @@ void* NodeImpl::handle_append_entries_cache_timedout(void* arg) {
     std::unique_lock<raft::raft_mutex_t> lck(node->_mutex);
     if (node->_append_entries_cache &&
         timer_arg->cache_version == node->_append_entries_cache->cache_version()) {
-        node->_append_entries_cache->do_handle_append_entries_cache_timedout(
-                timer_arg->timer_version, timer_arg->timer_start_ms);
-        if (node->_append_entries_cache->empty()) {
-            delete node->_append_entries_cache;
-            node->_append_entries_cache = NULL;
-        }
+        // node->_append_entries_cache->do_handle_append_entries_cache_timedout(
+        //         timer_arg->timer_version, timer_arg->timer_start_ms);
+        // if (node->_append_entries_cache->empty()) {
+        //     delete node->_append_entries_cache;
+        //     node->_append_entries_cache = NULL;
+        // }
     }
     lck.unlock();
     delete timer_arg;
@@ -1495,46 +1535,47 @@ bool NodeImpl::AppendEntriesCache::empty() const {
     return _rpc_map.empty();
 }
 
-void NodeImpl::check_append_entries_cache(int64_t local_last_index) {
+void NodeImpl::check_append_entries_cache(int64_t dependency_bitmap, int64_t last_log_index) {
     if (!_append_entries_cache) {
         return;
     }
-    _append_entries_cache->process_runable_rpcs(local_last_index);
-    if (_append_entries_cache->empty()) {
-        delete _append_entries_cache;
-        _append_entries_cache = NULL;
-    }
+    _append_entries_cache->process_runable_rpcs(dependency_bitmap, last_log_index);
+    // if (_append_entries_cache->empty()) {
+    //     delete _append_entries_cache;
+    //     _append_entries_cache = NULL;
+    // }
 }
 bool NodeImpl::AppendEntriesCache::store(AppendEntriesRpc* rpc) {
-    if (!_rpc_map.empty()) {
-        bool need_clear = false;
-        std::map<int64_t, AppendEntriesRpc*>::iterator it =
-            _rpc_map.lower_bound(rpc->request->prev_log_index());
-        int64_t rpc_prev_index = rpc->request->prev_log_index();
-        int64_t rpc_last_index = rpc_prev_index + rpc->request->entries_size();
+    // if (!_rpc_map.empty()) {
+    //     bool need_clear = false;
+    //     std::map<int64_t, AppendEntriesRpc*>::iterator it =
+    //         _rpc_map.lower_bound(rpc->request->prev_log_index());
+    //     int64_t rpc_prev_index = rpc->request->prev_log_index();
+    //     int64_t rpc_last_index = rpc_prev_index + rpc->request->entries_size();
 
-        // Some rpcs with the overlap log index alredy exist, means retransmission
-        // happend, simplely clean all out of order requests, and store the new
-        // one.
-        if (it != _rpc_map.begin()) {
-            --it;
-            AppendEntriesRpc* prev_rpc = it->second;
-            if (prev_rpc->request->prev_log_index() +
-                prev_rpc->request->entries_size() > rpc_prev_index) {
-                need_clear = true;
-            }
-            ++it;
-        }
-        if (!need_clear && it != _rpc_map.end()) {
-            AppendEntriesRpc* next_rpc = it->second;
-            if (next_rpc->request->prev_log_index() < rpc_last_index) {
-                need_clear = true;
-            }
-        }
-        if (need_clear) {
-            clear();
-        }
-    }
+    //     // Some rpcs with the overlap log index alredy exist, means retransmission
+    //     // happend, simplely clean all out of order requests, and store the new
+    //     // one.
+    //     if (it != _rpc_map.begin()) {
+    //         --it;
+    //         AppendEntriesRpc* prev_rpc = it->second;
+    //         if (prev_rpc->request->prev_log_index() +
+    //             prev_rpc->request->entries_size() > rpc_prev_index) {
+    //             need_clear = true;
+    //         }
+    //         ++it;
+    //     }
+    //     if (!need_clear && it != _rpc_map.end()) {
+    //         AppendEntriesRpc* next_rpc = it->second;
+    //         if (next_rpc->request->prev_log_index() < rpc_last_index) {
+    //             need_clear = true;
+    //         }
+    //     }
+    //     if (need_clear) {
+    //         clear();
+    //     }
+    // }
+    LOG(INFO) << "cache size is " << _rpc_map.size();
     _rpc_queue.Append(rpc);
     _rpc_map.insert(std::make_pair(rpc->request->prev_log_index(), rpc));
 
@@ -1564,17 +1605,79 @@ bool NodeImpl::AppendEntriesCache::store(AppendEntriesRpc* rpc) {
     return true;
 }
 
-void NodeImpl::AppendEntriesCache::process_runable_rpcs(int64_t local_last_index) {
-    CHECK(!_rpc_map.empty());
-    CHECK(!_rpc_queue.empty());
+// bool NodeImpl::AppendEntriesCache::check_dependency(int64_t this_log_index, int64_t dependency){
+//     // if it does not have confliction
+//     // LOG(INFO) << "checking entry=" << this_log_index << "dependency = "<< std::bitset<64>(dependency);
+//     // LOG(INFO) << "Now _local_last_log_index=" <<_local_last_log_index<<" _dependency_bitmap=" << std::bitset<64>(_dependency_bitmap);
+//     if (dependency == 0){
+//         return true;
+//     }
+//     int64_t offset = 0;
+//     if (this_log_index > _local_last_log_index){
+//         if (((_dependency_bitmap << (this_log_index - _local_last_log_index)) & dependency) == dependency){
+//             return true;
+//         }
+//     } else {
+//         if (((_dependency_bitmap >> (_local_last_log_index - this_log_index)) & dependency) == dependency){
+//             return true;
+//         }
+//     }
+//     return false;
+// }
+
+// void NodeImpl::AppendEntriesCache::notify_commit(int64_t prev_log_index, int64_t num_entries){
+//     // LOG(INFO) << "Entry " << prev_log_index + num_entries << " committed!";
+//     if (num_entries == 0){
+//         return;
+//     }
+//     int64_t gap = prev_log_index + num_entries - _local_last_log_index;
+//     if (gap > 0){
+//         _local_last_log_index = prev_log_index + num_entries;
+//         _dependency_bitmap = _dependency_bitmap << gap;
+//     }
+    
+//     int64_t local_dependency = 0;
+//     for (int64_t i=0; i<num_entries; i++){
+//         local_dependency = local_dependency | 1;
+//         local_dependency << 1;
+//     }
+//     local_dependency << (_local_last_log_index - prev_log_index + num_entries);
+//     _dependency_bitmap = _dependency_bitmap | local_dependency;
+// }
+
+void NodeImpl::AppendEntriesCache::process_runable_rpcs(int64_t dependency_bitmap, int64_t last_log_index) {
+    // CHECK(!_rpc_map.empty());
+    // CHECK(!_rpc_queue.empty());
+    if (_rpc_map.empty() || _rpc_queue.empty()){
+        return;
+    }
     HandleAppendEntriesFromCacheArg* arg = NULL;
+    // we need to check all the requests in cache because they all may need local_last_index
     for (std::map<int64_t, AppendEntriesRpc*>::iterator it = _rpc_map.begin();
         it != _rpc_map.end();) {
         AppendEntriesRpc* rpc = it->second;
-        if (rpc->request->prev_log_index() > local_last_index) {
-            break;
+        int64_t rpc_dependency = rpc->request->dependency();
+        int64_t index = (rpc->request->prev_log_index() + rpc->request->entries_size());
+        int64_t gap = last_log_index - index;
+        // if it is still in the cache range and have the chance to be processed
+        if // if gap < 0, it must go through this process because max bit length of rpc_dependency is 64
+            ((gap > 0 && (((dependency_bitmap >> gap) & rpc_dependency) != rpc_dependency))
+                || (gap <= 0 && (((dependency_bitmap << -gap) & rpc_dependency) != rpc_dependency))){
+            it++;
+            continue;
         }
-        local_last_index = rpc->request->prev_log_index() + rpc->request->entries_size();
+        // if (rpc->request->prev_log_index() > local_last_index) {
+        //     break;
+        // }
+        // local_last_index = rpc->request->prev_log_index() + rpc->request->entries_size();
+        LOG(INFO) << "pop entry " << rpc->request->prev_log_index() + rpc->request->entries_size() << " because of " << (rpc_dependency >> (64 - gap) == 0) << " gap = " << gap;
+        // LOG(INFO) << "rpc_dependency >> (64 - gap) = " << std::bitset<64>(rpc_dependency >> (64 - gap));
+        // if (gap > 0){
+        //     LOG(INFO) << "(dependency_bitmap >> gap)" << std::bitset<64>(dependency_bitmap >> gap) << "((dependency_bitmap >> gap) & rpc_dependency)" << std::bitset<64>((dependency_bitmap >> gap) & rpc_dependency);
+        // } else {
+        //     LOG(INFO) << "(dependency_bitmap << gap)" << std::bitset<64>(dependency_bitmap << -gap) << "((dependency_bitmap >> gap) & rpc_dependency)" << std::bitset<64>((dependency_bitmap << -gap) & rpc_dependency);
+        // }
+        LOG(INFO) << "rpc_dependency = " << std::bitset<64>(rpc_dependency) << " dependency_bitmap = " << std::bitset<64>(dependency_bitmap);
         _rpc_map.erase(it++);
         rpc->RemoveFromList();
         if (arg == NULL) {

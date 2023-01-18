@@ -34,6 +34,7 @@ LogManager::LogManager()
     , _first_log_index(0)
     , _last_log_index(0)
     , _max_log_index(0)
+    , _dependency_bitmap(0)
 {
     CHECK_EQ(0, start_disk_thread());
 }
@@ -95,7 +96,7 @@ void LogManager::clear_memory_logs(const LogId& id) {
             while (!_logs_in_memory.empty() 
                     && nentries < ARRAY_SIZE(entries_to_clear)) {
                 LogEntry* entry = _logs_in_memory.front();
-                if (entry->id > id) {
+                if (entry == NULL || entry->id > id) {
                     break;
                 }
                 entries_to_clear[nentries++] = entry;
@@ -145,6 +146,10 @@ int64_t LogManager::last_log_index(bool is_flush) {
         c.wait();
         return c.last_log_id().index;
     }
+}
+
+int64_t LogManager::max_log_index(bool is_flush){
+    return _max_log_index;
 }
 
 LogId LogManager::last_log_id(bool is_flush) {
@@ -208,6 +213,7 @@ private:
 int LogManager::truncate_prefix(const int64_t first_index_kept,
                                 std::unique_lock<raft::raft_mutex_t>& lck) {
     std::deque<LogEntry*> saved_logs_in_memory;
+    LOG(INFO) << "truncate prefix happens first_index_kept = " << first_index_kept << " _max_log_index = " << _max_log_index << " _logs_in_memory.size = " << _logs_in_memory.size();
     // As the duration between two snapshot (which leads to truncate_prefix at
     // last) is likely to be a long period, _logs_in_memory is likely to
     // contain a large amount of logs to release, which holds the mutex so that
@@ -324,12 +330,31 @@ int LogManager::check_and_resolve_conflict(
             return 1;
         }
         // std::cout << " entries->size() : " << entries->size() << std::endl;
-        if (entries->front()->id.index == _last_log_index + 1) {
+        if (entries->front()->id.index == _max_log_index + 1) {
             // Fast path
             // _last_log_index = entries->back()->id.index;
+            for (std::vector<LogEntry*>::iterator it_entry = entries->begin(); it_entry!=entries->end(); it_entry++){
+                _dependency_bitmap = (_dependency_bitmap << 1) | _base_bit;
+                _logs_in_memory.push_back(*it_entry);
+                _max_log_index++;
+            }
         } else {
             if (entries->back()->id.index > _max_log_index){
-                _max_log_index = entries->back()->id.index;
+                std::vector<LogEntry*>::iterator it_entry = entries->begin();
+                int64_t first_log_index = _max_log_index - _logs_in_memory.size() + 1;
+                while (_max_log_index < entries->back()->id.index){
+                    _max_log_index++;
+                    // LOG(INFO) << "bitmap changed from " << std::bitset<64>(_dependency_bitmap);
+                    if ((*it_entry)->id.index == _max_log_index){
+                        _dependency_bitmap = (_dependency_bitmap << 1) | _base_bit;
+                        _logs_in_memory.push_back(*it_entry);
+                        it_entry++;
+                    } else {
+                        _dependency_bitmap = _dependency_bitmap << 1;
+                        _logs_in_memory.push_back(NULL);
+                    }
+                    // LOG(INFO) << "bitmap changed to " << std::bitset<64>(_dependency_bitmap);
+                }
                 done_guard.release();
                 return 0;
             }
@@ -381,6 +406,12 @@ int LogManager::check_and_resolve_conflict(
         if (!entries->empty()){
             _max_log_index = std::max(_max_log_index, entries->back()->id.index);
         }
+        // Fill all the missing entries
+        // int64_t first_log_index = _max_log_index - _logs_in_memory.size();
+        // while (_max_log_index - first_log_index + 1 > _logs_in_memory.size()){
+        //     _dependency_bitmap = _dependency_bitmap << 1;
+        //     _logs_in_memory.push_back(NULL);
+        // }
         done_guard.release();
         return 0;
     }
@@ -389,9 +420,43 @@ int LogManager::check_and_resolve_conflict(
     return -1;
 }
 
+
+int64_t LogManager::get_dependency_bitmap(){
+    return _dependency_bitmap;
+}
+
+bool LogManager::check_dependency(int64_t this_log_index, int64_t dependency){
+    // if it does not have confliction
+    if (dependency == 0){
+        return true;
+    }
+    if (this_log_index > _max_log_index){
+        if (((_dependency_bitmap << (this_log_index - _max_log_index)) & dependency) == dependency){
+            return true;
+        }
+    } else {
+        // extra dependency
+        int64_t gap = _max_log_index - this_log_index;
+        // if dependency has been greater than dependency checking length
+        if (gap >= 64) {
+            return true;
+        }
+        int64_t mask = _MAX_DEPENDENCY >> gap;
+        dependency = dependency & mask;
+        if (((_dependency_bitmap >> (_max_log_index - this_log_index)) & dependency) == dependency){
+            return true;
+        }
+    }
+    // need to be added to cache
+    LOG(INFO) << "checking entry=" << this_log_index << "dependency = "<< std::bitset<64>(dependency);
+    LOG(INFO) << "Now _max_log_index=" <<_max_log_index<<" _dependency_bitmap=" << std::bitset<64>(_dependency_bitmap);
+    return false;
+}
+
 void LogManager::append_entries(
             std::vector<LogEntry*> *entries, StableClosure* done, bool ooRep) {
     CHECK(done);
+    // LOG(INFO) << "_max_log_index = " << _max_log_index;
     if (_has_error.load(butil::memory_order_relaxed)) {
         for (size_t i = 0; i < entries->size(); ++i) {
             (*entries)[i]->Release();
@@ -424,32 +489,58 @@ void LogManager::append_entries(
     if (!entries->empty()) {
         done->_first_log_index = entries->front()->id.index;
         /* Find the position to insert, we need to change the _last_log_index if it connects the _last_log_index and first ooEntry */
-        std::deque<LogEntry*>::iterator it = _logs_in_memory.begin();
-        for (; it != _logs_in_memory.end();){
-            if ((*it)->id.index >= entries->front()->id.index){
-                break;
-            }
-            // LOG(INFO) << "(*it)->id.index " << (*it)->id.index;
-            ++it;
-        }
+
+        // LOG(INFO) << "before inserting _logs_in_memory.size = " << _logs_in_memory.size();
+
+        // Fill all the missing entries
         
-        std::vector<LogEntry*>::iterator it_entry = entries->begin();
-        while (it_entry != entries->end() && it != _logs_in_memory.end()){
-            if ((*it_entry)->id.index != (*it)->id.index){
-                /* Earse overlapping entries */
-                _logs_in_memory.insert(it, *it_entry++);
-            } else {
-                /* Connect sequential entries */
-                (*it_entry)->Release();
-                entries->erase(it_entry);
-                /* Note that |entries| is sequential, so if we operate |it|++, *it->id.index must be greater or equal to *it_entry++->id.index */
-                it++;
-            }
+        while (_max_log_index < entries->back()->id.index){
+            _max_log_index++;
+            // LOG(INFO) << "bitmap changed from " << std::bitset<64>(_dependency_bitmap);
+            _dependency_bitmap = _dependency_bitmap << 1;
+            // LOG(INFO) << "bitmap changed to " << std::bitset<64>(_dependency_bitmap);
+            _logs_in_memory.push_back(NULL);
         }
-        while (it_entry != entries->end()){
-            _logs_in_memory.push_back(*it_entry);
-            it_entry++;
+
+        int64_t first_log_index = _max_log_index - _logs_in_memory.size() + 1;
+        
+        for (std::vector<LogEntry*>::iterator it_entry = entries->begin(); it_entry != entries->end(); it_entry++){
+            _logs_in_memory[(*it_entry)->id.index - first_log_index] = *it_entry;
+            _dependency_bitmap = _dependency_bitmap | (_base_bit << (_max_log_index - (*it_entry)->id.index));
+            // LOG(INFO) << "new log entry written =" << (*it_entry)->id.index << "dependency = "<< std::bitset<64>(_dependency_bitmap) << " _max_log_index = " << _max_log_index << " position = " << (_max_log_index - (*it_entry)->id.index) 
+            //           << "_logs_in_memory.size = " << _logs_in_memory.size() << " new bit = " << std::bitset<64>(_base_bit << (_max_log_index - (*it_entry)->id.index));
         }
+
+        while (_last_log_index < _max_log_index && _logs_in_memory[_last_log_index - first_log_index + 1] != NULL){
+            _last_log_index++;
+        }
+
+
+        // for (; it != _logs_in_memory.end();){
+        //     if ((*it)->id.index >= entries->front()->id.index){
+        //         break;
+        //     }
+        //     // LOG(INFO) << "(*it)->id.index " << (*it)->id.index;
+        //     ++it;
+        // }
+        
+        // std::vector<LogEntry*>::iterator it_entry = entries->begin();
+        // while (it_entry != entries->end() && it != _logs_in_memory.end()){
+        //     if ((*it_entry)->id.index != (*it)->id.index){
+        //         /* Earse overlapping entries */
+        //         _logs_in_memory.insert(it, *it_entry++);
+        //     } else {
+        //         /* Connect sequential entries */
+        //         (*it_entry)->Release();
+        //         entries->erase(it_entry);
+        //         /* Note that |entries| is sequential, so if we operate |it|++, *it->id.index must be greater or equal to *it_entry++->id.index */
+        //         it++;
+        //     }
+        // }
+        // while (it_entry != entries->end()){
+        //     _logs_in_memory.push_back(*it_entry);
+        //     it_entry++;
+        // }
         // if (_logs_in_memory.size() % 100 == 0){
         //     std::stringstream ss;
         //     for (std::deque<LogEntry*>::iterator t_it = _logs_in_memory.begin(); t_it != _logs_in_memory.end(); t_it++){
@@ -457,13 +548,15 @@ void LogManager::append_entries(
         //     }
         //     LOG(INFO) << ss;
         // }
-        it = _logs_in_memory.begin();
-        while (it + 1 != _logs_in_memory.end() && (*it)->id.index + 1 == (*(it + 1))->id.index){
-            _last_log_index = std::max(_last_log_index, (*(it + 1))->id.index);
-            // _logs_in_memory.pop_front();
-            it++;
-        }
-        _max_log_index = std::max(entries->back()->id.index, _max_log_index);
+        // it = _logs_in_memory.begin();
+        // while (it + 1 != _logs_in_memory.end() && (*it)->id.index + 1 == (*(it + 1))->id.index){
+        //     _last_log_index = std::max(_last_log_index, (*(it + 1))->id.index);
+        //     // _logs_in_memory.pop_front();
+        //     it++;
+        // }
+        // if (!entries->empty()){
+        //     _max_log_index = std::max(entries->back()->id.index, _max_log_index);
+        // }
     }
 
     done->_entries.swap(*entries);
@@ -643,27 +736,30 @@ int LogManager::disk_thread(void* meta,
 LogEntry* LogManager::get_entry_from_memory(const int64_t index) {
     LogEntry* entry = NULL;
     if (!_logs_in_memory.empty()) {
-        int64_t first_index = _logs_in_memory.front()->id.index;
+        // The first one may be NULL
+        int64_t first_index = _logs_in_memory.back()->id.index - _logs_in_memory.size() + 1;
+        // The last one must be NOT NULL
         int64_t last_index = _logs_in_memory.back()->id.index;
-        // LOG(INFO) << "get entry index = " << index;
-        if (first_index <= index && index <= _last_log_index){
+
+        if (first_index <= index && index <= last_index){
             entry = _logs_in_memory[index - first_index];
             return entry;
         }
         /* ooEntries don't follow this constrain */
         // CHECK_EQ(last_index - first_index + 1, static_cast<int64_t>(_logs_in_memory.size()));
-        if (index >= first_index && index <= last_index) {
-            // entry = _logs_in_memory[index - first_index];
-            /* The position cannot be calculated because of ooEntries. We need to iterate the full deque. */
-            std::deque<LogEntry*>::iterator it = _logs_in_memory.begin();
-            for (; it != _logs_in_memory.end(); ++it){
-                if ((*it)->id.index == index){
-                    entry = *it;
-                    break;
-                }
-            }
-        }
+        // if (index >= first_index && index <= last_index) {
+        //     // entry = _logs_in_memory[index - first_index];
+        //     /* The position cannot be calculated because of ooEntries. We need to iterate the full deque. */
+        //     std::deque<LogEntry*>::iterator it = _logs_in_memory.begin();
+        //     for (; it != _logs_in_memory.end(); ++it){
+        //         if ((*it)->id.index == index){
+        //             entry = *it;
+        //             break;
+        //         }
+        //     }
+        // }
     }
+    // LOG(INFO) << "get entry index = " << index << " is NULL";
     return entry;
 }
 
