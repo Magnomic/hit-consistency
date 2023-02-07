@@ -17,6 +17,8 @@ DEFINE_bool(oo_enabled, false,
             "if cache is enabled in replication process");
 BRPC_VALIDATE_GFLAG(oo_enabled, ::brpc::PassValidate);
 
+DEFINE_int32(dependency_look_back, 63, "The length of dependency look back");
+
 struct GlobalExtension {
     SegmentLogStorage local_log;
     LocalRaftMetaStorage local_meta;
@@ -159,7 +161,7 @@ private:
         // tell cache committed entries, which can help it check dependency completion
         // _node->_append_entries_cache->notify_commit(_request->prev_log_index(), _request->entries_size());
         lck.unlock();
-
+        _node->check_append_entries_cache(_node->_log_manager->get_dependency_bitmap(), _node->_log_manager->max_log_index());
         // DON'T touch _node any more
         _response->set_success(true);
         _response->set_term(_term);
@@ -220,6 +222,8 @@ int NodeImpl::init(NodeOptions node_options, const GroupId& group_id, const Peer
     _conf.id = LogId();
     _conf.conf = _options.initial_conf;
     _server_id = peer_id;
+    _dependency_look_back = FLAGS_dependency_look_back;
+    _MAX_DEPENDENCY = (1L << _dependency_look_back) - 1;
     node_options.initial_conf.list_peers(&_peer_list);
 
     _config_manager = new ConfigurationManager();
@@ -315,8 +319,9 @@ int NodeImpl::start(){
     //     LOG(ERROR) << "Fail to start EchoServer";
     //     return -1;
     // }
-
-    _election_timer.start();
+    if (_server_id.addr.port == 8000){
+        _election_timer.start();
+    }
 
     // Wait until Ctrl-C is pressed, then Stop() and Join() the server.
     // server.RunUntilAskedToQuit();
@@ -516,6 +521,12 @@ void NodeImpl::apply_task(const Task& task){
 
 void NodeImpl::prevote(std::unique_lock<raft::raft_mutex_t>* lck){
     // Create a new ballot for pre-vote
+
+
+    if (_server_id.addr.port != 8000){
+        return;
+    }
+
     _prevote_ctx.init(_conf.conf, _conf.stable() ? NULL : &_conf.old_conf);
 
     LOG(INFO)<< _log_manager->last_log_id();
@@ -950,16 +961,18 @@ void NodeImpl::handle_append_entries_request(brpc::Controller* cntl,
         }
     }
 
-    // check out-of-order cache
-    // We should also notify cache manager that this entry has been committed.
-    if (FLAGS_cache_enabled){
-        check_append_entries_cache(_log_manager->get_dependency_bitmap(), _log_manager->max_log_index());
-    }
 
     FollowerStableClosure* c = new FollowerStableClosure(
             cntl, request, response, done_guard.release(),
             this, _current_term);
     _log_manager->append_entries(&entries, c, FLAGS_oo_enabled);
+
+
+    // check out-of-order cache
+    // We should also notify cache manager that this entry has been committed.
+    if (FLAGS_cache_enabled){
+        check_append_entries_cache(_log_manager->get_dependency_bitmap(), _log_manager->max_log_index());
+    }
 
     // update configuration after _log_manager updated its memory status
     _log_manager->check_and_set_configuration(&_conf);
@@ -979,7 +992,7 @@ bool NodeImpl::handle_out_of_order_append_entries(brpc::Controller* cntl,
         _append_entries_cache = new AppendEntriesCache(this, ++_append_entries_cache_version);
     }
     AppendEntriesRpc* rpc = new AppendEntriesRpc;
-    LOG(INFO) << "Add entry " << request->prev_log_index() + 1 << " to cache ";
+    // LOG(INFO) << "Add entry " << request->prev_log_index() + 1 << " to cache ";
     rpc->cntl = cntl;
     rpc->request = request;
     rpc->response = response;
@@ -1035,7 +1048,7 @@ bool NodeImpl::resolve_dependency(int64_t last_term, int64_t last_index, int64_t
 int64_t NodeImpl::check_dependency(int64_t dependency_id){
     int64_t dependency = 0L;
     
-    if (_dependency_id_queue.size() > 63){
+    if (_dependency_id_queue.size() > _dependency_look_back){
         _dependency_id_queue.pop_front();
     }
 
@@ -1266,6 +1279,7 @@ int NodeImpl::init_log_storage() {
     log_manager_options.log_storage = _log_storage;
     log_manager_options.configuration_manager = _config_manager;
     log_manager_options.fsm_caller = _fsm_caller;
+    log_manager_options.dependency_look_back = FLAGS_dependency_look_back;
     return _log_manager->init(log_manager_options);
 }
 
@@ -1535,7 +1549,7 @@ bool NodeImpl::AppendEntriesCache::empty() const {
     return _rpc_map.empty();
 }
 
-void NodeImpl::check_append_entries_cache(int64_t dependency_bitmap, int64_t last_log_index) {
+void NodeImpl::check_append_entries_cache(std::bitset<1024> dependency_bitmap, int64_t last_log_index) {
     if (!_append_entries_cache) {
         return;
     }
@@ -1575,7 +1589,7 @@ bool NodeImpl::AppendEntriesCache::store(AppendEntriesRpc* rpc) {
     //         clear();
     //     }
     // }
-    LOG(INFO) << "cache size is " << _rpc_map.size();
+    // LOG(INFO) << "cache size is " << _rpc_map.size();
     _rpc_queue.Append(rpc);
     _rpc_map.insert(std::make_pair(rpc->request->prev_log_index(), rpc));
 
@@ -1645,7 +1659,7 @@ bool NodeImpl::AppendEntriesCache::store(AppendEntriesRpc* rpc) {
 //     _dependency_bitmap = _dependency_bitmap | local_dependency;
 // }
 
-void NodeImpl::AppendEntriesCache::process_runable_rpcs(int64_t dependency_bitmap, int64_t last_log_index) {
+void NodeImpl::AppendEntriesCache::process_runable_rpcs(std::bitset<1024> dependency_bitmap, int64_t last_log_index) {
     // CHECK(!_rpc_map.empty());
     // CHECK(!_rpc_queue.empty());
     if (_rpc_map.empty() || _rpc_queue.empty()){
@@ -1656,7 +1670,7 @@ void NodeImpl::AppendEntriesCache::process_runable_rpcs(int64_t dependency_bitma
     for (std::map<int64_t, AppendEntriesRpc*>::iterator it = _rpc_map.begin();
         it != _rpc_map.end();) {
         AppendEntriesRpc* rpc = it->second;
-        int64_t rpc_dependency = rpc->request->dependency();
+        std::bitset<1024> rpc_dependency(rpc->request->dependency());
         int64_t index = (rpc->request->prev_log_index() + rpc->request->entries_size());
         int64_t gap = last_log_index - index;
         // if it is still in the cache range and have the chance to be processed
@@ -1664,20 +1678,23 @@ void NodeImpl::AppendEntriesCache::process_runable_rpcs(int64_t dependency_bitma
             ((gap > 0 && (((dependency_bitmap >> gap) & rpc_dependency) != rpc_dependency))
                 || (gap <= 0 && (((dependency_bitmap << -gap) & rpc_dependency) != rpc_dependency))){
             it++;
+
+            // LOG(INFO) << "entry " << rpc->request->prev_log_index() + rpc->request->entries_size() << " cannot be popped because of " << (rpc_dependency >> (64 - gap) == 0) << " gap = " << gap;
+            // LOG(INFO) << "rpc_dependency = " << std::bitset<64>(rpc_dependency) << " dependency_bitmap = " << std::bitset<64>(dependency_bitmap);
             continue;
         }
         // if (rpc->request->prev_log_index() > local_last_index) {
         //     break;
         // }
         // local_last_index = rpc->request->prev_log_index() + rpc->request->entries_size();
-        LOG(INFO) << "pop entry " << rpc->request->prev_log_index() + rpc->request->entries_size() << " because of " << (rpc_dependency >> (64 - gap) == 0) << " gap = " << gap;
+        // LOG(INFO) << "pop entry " << rpc->request->prev_log_index() + rpc->request->entries_size() << " because of " << (rpc_dependency >> (64 - gap) == 0) << " gap = " << gap;
         // LOG(INFO) << "rpc_dependency >> (64 - gap) = " << std::bitset<64>(rpc_dependency >> (64 - gap));
         // if (gap > 0){
         //     LOG(INFO) << "(dependency_bitmap >> gap)" << std::bitset<64>(dependency_bitmap >> gap) << "((dependency_bitmap >> gap) & rpc_dependency)" << std::bitset<64>((dependency_bitmap >> gap) & rpc_dependency);
         // } else {
         //     LOG(INFO) << "(dependency_bitmap << gap)" << std::bitset<64>(dependency_bitmap << -gap) << "((dependency_bitmap >> gap) & rpc_dependency)" << std::bitset<64>((dependency_bitmap << -gap) & rpc_dependency);
         // }
-        LOG(INFO) << "rpc_dependency = " << std::bitset<64>(rpc_dependency) << " dependency_bitmap = " << std::bitset<64>(dependency_bitmap);
+        // LOG(INFO) << "rpc_dependency = " << std::bitset<64>(rpc_dependency) << " dependency_bitmap = " << std::bitset<64>(dependency_bitmap);
         _rpc_map.erase(it++);
         rpc->RemoveFromList();
         if (arg == NULL) {

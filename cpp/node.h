@@ -131,7 +131,7 @@ friend class FollowerStableClosure;
         int64_t cache_version() const;
         bool empty() const;
         bool store(AppendEntriesRpc* rpc);
-        void process_runable_rpcs(int64_t dependency_bitmap, int64_t last_log_index);
+        void process_runable_rpcs(std::bitset<1024> dependency_bitmap, int64_t last_log_index);
         void clear();
         // void notify_commit(int64_t prev_log_index, int64_t num_entries);
         // bool check_dependency(int64_t prev_log_index, int64_t dependency);
@@ -222,8 +222,9 @@ friend class FollowerStableClosure;
 
         bthread::ExecutionQueue<LogEntryAndClosure>::scoped_ptr_t _apply_queue;
 
+        int64_t _dependency_look_back;
         // 011111111...63
-        int64_t _MAX_DEPENDENCY = (1L << 63) - 1;
+        int64_t _MAX_DEPENDENCY;
 
         NodeImpl();
         
@@ -322,6 +323,6 @@ friend class FollowerStableClosure;
 
         static void* handle_append_entries_from_cache(void* arg);
 
-        void check_append_entries_cache(int64_t dependency_bitmap, int64_t last_log_index);
+        void check_append_entries_cache(std::bitset<1024> dependency_bitmap, int64_t last_log_index);
 };
 #endif 

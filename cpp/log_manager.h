@@ -24,6 +24,7 @@ struct LogManagerOptions {
     LogStorage* log_storage;
     ConfigurationManager* configuration_manager;
     FSMCaller* fsm_caller;  // To report log error
+    int64_t dependency_look_back;
 };
 
 struct LogManagerStatus {
@@ -132,7 +133,7 @@ public:
 
     bool check_dependency(int64_t this_log_index, int64_t dependency);
 
-    int64_t get_dependency_bitmap();
+    std::bitset<1024> get_dependency_bitmap();
 
 private:
 friend class AppendBatcher;
@@ -197,8 +198,9 @@ friend class AppendBatcher;
     WaitId _next_wait_id;
     int64_t _base_bit = 1;
 
+    int64_t _dependency_look_back;
     // 011111111...63
-    int64_t _MAX_DEPENDENCY = (1L << 63) - 1;
+    std::bitset<1024> _MAX_DEPENDENCY;
     LogId _disk_id;
     LogId _applied_id;
     // TODO(chenzhangyi01): replace deque with a thread-safe data structure
@@ -209,7 +211,7 @@ friend class AppendBatcher;
     // 乱序达到的最大index
     int64_t _max_log_index;
 
-    int64_t _dependency_bitmap;
+    std::bitset<1024> _dependency_bitmap;
 
     LogId _last_snapshot_id;
     // the virtual first log, for finding next_index of replicator, which 

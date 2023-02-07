@@ -48,6 +48,12 @@ int LogManager::init(const LogManagerOptions &options) {
         PLOG(ERROR) << "Fail to init _wait_map";
         return ENOMEM;
     }
+    _dependency_look_back = options.dependency_look_back;
+    for (int64_t i=0; i<_dependency_look_back; i++){
+        _MAX_DEPENDENCY.set(i);
+    }
+    // _MAX_DEPENDENCY = std::bitset<1024>(1L << _dependency_look_back) - 1;
+    LOG(INFO) << "_MAX_DEPENDENCY " << _MAX_DEPENDENCY;
     _log_storage = options.log_storage;
     LOG(INFO) << _log_storage;
     _config_manager = options.configuration_manager;
@@ -334,7 +340,8 @@ int LogManager::check_and_resolve_conflict(
             // Fast path
             // _last_log_index = entries->back()->id.index;
             for (std::vector<LogEntry*>::iterator it_entry = entries->begin(); it_entry!=entries->end(); it_entry++){
-                _dependency_bitmap = (_dependency_bitmap << 1) | _base_bit;
+                _dependency_bitmap = (_dependency_bitmap << 1);
+                _dependency_bitmap.set(0);
                 _logs_in_memory.push_back(*it_entry);
                 _max_log_index++;
             }
@@ -346,7 +353,8 @@ int LogManager::check_and_resolve_conflict(
                     _max_log_index++;
                     // LOG(INFO) << "bitmap changed from " << std::bitset<64>(_dependency_bitmap);
                     if ((*it_entry)->id.index == _max_log_index){
-                        _dependency_bitmap = (_dependency_bitmap << 1) | _base_bit;
+                        _dependency_bitmap = (_dependency_bitmap << 1);
+                        _dependency_bitmap.set(0);
                         _logs_in_memory.push_back(*it_entry);
                         it_entry++;
                     } else {
@@ -421,7 +429,7 @@ int LogManager::check_and_resolve_conflict(
 }
 
 
-int64_t LogManager::get_dependency_bitmap(){
+std::bitset<1024> LogManager::get_dependency_bitmap(){
     return _dependency_bitmap;
 }
 
@@ -430,26 +438,25 @@ bool LogManager::check_dependency(int64_t this_log_index, int64_t dependency){
     if (dependency == 0){
         return true;
     }
+    std::bitset<1024> bitmap_dependency(dependency);
     if (this_log_index > _max_log_index){
-        if (((_dependency_bitmap << (this_log_index - _max_log_index)) & dependency) == dependency){
+        if (((_dependency_bitmap << (this_log_index - _max_log_index)) & bitmap_dependency) == bitmap_dependency){
             return true;
         }
     } else {
         // extra dependency
         int64_t gap = _max_log_index - this_log_index;
         // if dependency has been greater than dependency checking length
-        if (gap >= 64) {
+        if (gap + _dependency_look_back >= 1024) {
             return true;
         }
-        int64_t mask = _MAX_DEPENDENCY >> gap;
-        dependency = dependency & mask;
-        if (((_dependency_bitmap >> (_max_log_index - this_log_index)) & dependency) == dependency){
+        if (((_dependency_bitmap >> (_max_log_index - this_log_index)) & bitmap_dependency) == bitmap_dependency){
             return true;
         }
     }
     // need to be added to cache
-    LOG(INFO) << "checking entry=" << this_log_index << "dependency = "<< std::bitset<64>(dependency);
-    LOG(INFO) << "Now _max_log_index=" <<_max_log_index<<" _dependency_bitmap=" << std::bitset<64>(_dependency_bitmap);
+    // LOG(INFO) << "checking entry=" << this_log_index << "dependency = "<< std::bitset<64>(dependency);
+    // LOG(INFO) << "Now _max_log_index=" <<_max_log_index<<" _dependency_bitmap=" << std::bitset<64>(_dependency_bitmap);
     return false;
 }
 
@@ -506,7 +513,8 @@ void LogManager::append_entries(
         
         for (std::vector<LogEntry*>::iterator it_entry = entries->begin(); it_entry != entries->end(); it_entry++){
             _logs_in_memory[(*it_entry)->id.index - first_log_index] = *it_entry;
-            _dependency_bitmap = _dependency_bitmap | (_base_bit << (_max_log_index - (*it_entry)->id.index));
+            _dependency_bitmap.set(_max_log_index - (*it_entry)->id.index);
+            // _dependency_bitmap = _dependency_bitmap | (_base_bit << (_max_log_index - (*it_entry)->id.index));
             // LOG(INFO) << "new log entry written =" << (*it_entry)->id.index << "dependency = "<< std::bitset<64>(_dependency_bitmap) << " _max_log_index = " << _max_log_index << " position = " << (_max_log_index - (*it_entry)->id.index) 
             //           << "_logs_in_memory.size = " << _logs_in_memory.size() << " new bit = " << std::bitset<64>(_base_bit << (_max_log_index - (*it_entry)->id.index));
         }

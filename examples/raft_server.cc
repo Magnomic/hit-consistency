@@ -15,7 +15,7 @@
 #include <gflags/gflags.h>
 
 
-DEFINE_string(conf, "0.0.0.0:8000:0,0.0.0.0:8001:0,0.0.0.0:8002:0", "Initial configuration of the replication group");
+DEFINE_string(conf, "0.0.0.0:8000:0,0.0.0.0:8001:0,0.0.0.0:8002:0,0.0.0.0:8003:0,0.0.0.0:8004:0,0.0.0.0:8005:0,0.0.0.0:8006:0,0.0.0.0:8007:0,0.0.0.0:8008:0", "Initial configuration of the replication group");
 DEFINE_int32(election_timeout_ms, 5000, 
             "Start election in such milliseconds if disconnect with the leader");
 DEFINE_bool(echo_attachment, true, "Echo attachment as well");

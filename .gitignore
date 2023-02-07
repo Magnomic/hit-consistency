@@ -13,3 +13,5 @@ third_party
 compile_commands.json
 CTestTestfile.cmake
 /test_*
+80*.log
+test.sh

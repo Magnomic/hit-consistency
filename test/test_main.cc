@@ -24,6 +24,13 @@ public:
 
 int main(int argc, char* argv[]) {
     std::vector<int64_t> entries = {1 ,2 ,3 ,4 ,5};
+    std::bitset<1024> bitmap(0);
+    int64_t num = (1L << 63) - 1;
+    bitmap.set(1023);
+    bitmap.set(1);
+    bitmap.set(62);
+    std::cout<< "bitmap >> 1 = " << (bitmap>>1) << std::endl;
+    std::cout<< "bitmap & int64_t = " << (bitmap & std::bitset<1024>(num)) << std::endl;
     int64_t temp = (1L << 63) - 1;
     std::cout << std::bitset<64>(temp) << std::endl;
     std::cout << std::bitset<64>(-1)<< std::endl;
